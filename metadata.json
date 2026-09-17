@@ -1,0 +1,6 @@
+{
+  "name": "Plotter",
+  "description": "Upload tabular data files (Excel, CSV, PDF, TSV), auto-categorize columns, receive AI plot recommendations, build multi-file charts, inspect visualizations, and export high-res images.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
