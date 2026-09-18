@@ -496,6 +496,16 @@ export function computeDateStatistics(
 }
 
 /**
+ * Generates a stable, order-invariant signature for a row by sorting its keys.
+ * Ensures consistent duplicate row detection regardless of object property order.
+ */
+export function generateRowSignature(row: Record<string, unknown>): string {
+  if (!row || typeof row !== "object") return "";
+  const sortedKeys = Object.keys(row).sort();
+  return sortedKeys.map((k) => `${k}:${JSON.stringify(row[k])}`).join("|");
+}
+
+/**
  * Profiles an entire dataset deterministically.
  */
 export function profileDataset(
@@ -596,11 +606,12 @@ export function profileDataset(
     columns.push(colProfile);
   }
 
-  // Duplicate rows detection
+  // Duplicate rows detection (order-invariant key signature)
   const rowSignatures = new Set<string>();
   let duplicateRowsCount = 0;
   for (const row of rows) {
-    const sig = JSON.stringify(row);
+    if (!row || typeof row !== "object") continue;
+    const sig = generateRowSignature(row);
     if (rowSignatures.has(sig)) {
       duplicateRowsCount++;
     } else {

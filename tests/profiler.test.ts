@@ -6,6 +6,7 @@ import {
   computeDateStatistics,
   inferColumnType,
   profileDataset,
+  generateRowSignature,
 } from "../src/utils/profiler/statisticalProfiler";
 import {
   computePearsonCorrelation,
@@ -83,6 +84,31 @@ describe("Deterministic Statistical Profiler", () => {
     assert.equal(inferColumnType("Status", ["Active", "Pending", "Active"], 3), "category");
     assert.equal(inferColumnType("customer_id", ["C-001", "C-002", "C-003"], 3), "id");
     assert.equal(inferColumnType("is_valid", [true, false, true], 3), "boolean");
+  });
+
+  test("detects duplicate rows stably regardless of object key order", () => {
+    const rows = [
+      { a: 1, b: "hello", c: true },
+      { c: true, a: 1, b: "hello" }, // identical values, reversed key order
+      { b: "hello", c: true, a: 2 }, // different value
+    ];
+    const { dataQuality } = profileDataset("t_dup", "dup_test.csv", rows);
+    assert.equal(dataQuality.totalRows, 3);
+    assert.equal(dataQuality.duplicateRowsCount, 1);
+  });
+
+  test("generateRowSignature produces identical signatures for rows with differing key orders", () => {
+    const rowA = { z: 99, a: "test", m: null };
+    const rowB = { a: "test", m: null, z: 99 };
+    const rowC = { a: "test", m: 0, z: 99 };
+
+    const sigA = generateRowSignature(rowA);
+    const sigB = generateRowSignature(rowB);
+    const sigC = generateRowSignature(rowC);
+
+    assert.equal(sigA, sigB);
+    assert.notEqual(sigA, sigC);
+    assert.equal(sigA, `a:"test"|m:null|z:99`);
   });
 });
 

@@ -7,11 +7,13 @@ import { AIRecommendations } from "./components/AIRecommendations";
 import { PlotBuilder } from "./components/PlotBuilder";
 import { PlotCard } from "./components/PlotCard";
 import { PlotInspectModal } from "./components/PlotInspectModal";
+import { ConfirmModal } from "./components/ConfirmModal";
 import {
   AIAnalysisResponse,
   AIRecommendation,
   ParsedTable,
   PlotConfig,
+  RawTablePayload,
 } from "./types";
 import { getInitializedSampleTables } from "./utils/sampleData";
 import { profileDataset } from "./utils/profiler/statisticalProfiler";
@@ -36,6 +38,7 @@ export default function App() {
   // Modals state
   const [previewTable, setPreviewTable] = useState<ParsedTable | null>(null);
   const [inspectPlot, setInspectPlot] = useState<PlotConfig | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
 
   // AI Analysis state (Loaded on demand, never forced automatically)
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisResponse | null>(null);
@@ -50,7 +53,7 @@ export default function App() {
 
     setIsAILoading(true);
     try {
-      const payload = {
+      const payload: { tables: RawTablePayload[] } = {
         tables: tablesToAnalyze.map((t) => ({
           id: t.id,
           fileName: t.fileName,
@@ -206,9 +209,12 @@ export default function App() {
 
   // Clear all plots
   const handleClearAllPlots = () => {
-    if (window.confirm("Are you sure you want to clear all plotted visualizations?")) {
-      setPlots([]);
-    }
+    setShowClearConfirm(true);
+  };
+
+  const confirmClearAllPlots = () => {
+    setPlots([]);
+    setShowClearConfirm(false);
   };
 
   // Apply AI Recommendation
@@ -400,6 +406,18 @@ export default function App() {
           onClose={() => setInspectPlot(null)}
         />
       )}
+
+      {/* Clear All Plots Confirmation Modal */}
+      <ConfirmModal
+        isOpen={showClearConfirm}
+        title="Clear All Visualizations"
+        message="Are you sure you want to clear all plotted visualizations? This action cannot be undone."
+        confirmLabel="Clear All"
+        cancelLabel="Cancel"
+        variant="danger"
+        onConfirm={confirmClearAllPlots}
+        onCancel={() => setShowClearConfirm(false)}
+      />
     </div>
   );
 }

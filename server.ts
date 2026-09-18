@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
+import rateLimit from "express-rate-limit";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import {
@@ -16,14 +17,18 @@ import {
   CrossFileCompatibility,
   VisualizationRecommendation,
 } from "./src/utils/profiler";
+import { RawTablePayload } from "./src/types";
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Model configuration
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 // Lazy initialization for Gemini client
 let genAIClient: GoogleGenAI | null = null;
@@ -52,10 +57,12 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+const MAX_ROWS_PER_TABLE = 1000;
+
 /**
  * Executes full deterministic profiling across all provided tables.
  */
-function runDeterministicAnalysis(tables: any[]): {
+function runDeterministicAnalysis(tables: RawTablePayload[]): {
   profiles: DatasetProfile[];
   dataQualityMap: Record<string, DataQualityReport>;
   crossFileAnalysis: CrossFileCompatibility[];
@@ -66,11 +73,12 @@ function runDeterministicAnalysis(tables: any[]): {
   tables.forEach((t, idx) => {
     const tableId = t.id || `table_${idx}`;
     const fileName = t.fileName || `dataset_${idx + 1}.csv`;
-    const rows: Record<string, any>[] = Array.isArray(t.rows) && t.rows.length > 0
+    const rawRows = Array.isArray(t.rows) && t.rows.length > 0
       ? t.rows
       : Array.isArray(t.sampleRows)
       ? t.sampleRows
       : [];
+    const rows: Record<string, any>[] = (rawRows as Record<string, any>[]).slice(0, MAX_ROWS_PER_TABLE);
 
     const { profile, dataQuality } = profileDataset(tableId, fileName, rows);
 
@@ -98,8 +106,8 @@ function runDeterministicAnalysis(tables: any[]): {
   if (profiles.length >= 2) {
     for (let i = 0; i < profiles.length; i++) {
       for (let j = i + 1; j < profiles.length; j++) {
-        const rows1 = tables[i]?.rows || tables[i]?.sampleRows || [];
-        const rows2 = tables[j]?.rows || tables[j]?.sampleRows || [];
+        const rows1 = (tables[i]?.rows || tables[i]?.sampleRows || []) as Record<string, any>[];
+        const rows2 = (tables[j]?.rows || tables[j]?.sampleRows || []) as Record<string, any>[];
         const compat = analyzeCrossFileCompatibility(
           profiles[i],
           profiles[j],
@@ -184,8 +192,9 @@ function validateTablesPayload(tables: unknown): { valid: boolean; error?: strin
       return { valid: false, error: `Table at index ${i} is not a valid object.` };
     }
 
-    const rows = (t as any).rows;
-    const sampleRows = (t as any).sampleRows;
+    const rawTable = t as RawTablePayload;
+    const rows = rawTable.rows;
+    const sampleRows = rawTable.sampleRows;
 
     if (rows !== undefined && !Array.isArray(rows)) {
       return { valid: false, error: `Table at index ${i} has invalid 'rows' property (must be an array).` };
@@ -199,13 +208,34 @@ function validateTablesPayload(tables: unknown): { valid: boolean; error?: strin
     if (activeRows.length > 0 && typeof activeRows[0] !== "object") {
       return { valid: false, error: `Table at index ${i} contains non-object rows.` };
     }
+
+    if (activeRows.length > MAX_ROWS_PER_TABLE) {
+      if (Array.isArray(rows)) {
+        rawTable.rows = rows.slice(0, MAX_ROWS_PER_TABLE);
+      }
+      if (Array.isArray(sampleRows)) {
+        rawTable.sampleRows = sampleRows.slice(0, MAX_ROWS_PER_TABLE);
+      }
+    }
   }
 
   return { valid: true };
 }
 
+// Rate limiter for /api/analyze-table (triggers Gemini API calls)
+const analyzeRateLimitMax = Number(process.env.ANALYZE_TABLE_RATE_LIMIT) || 20;
+const analyzeTableLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: analyzeRateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Too many table analysis requests from this IP. Please try again later.",
+  },
+});
+
 // AI Table Analysis & Visualization Recommendation Endpoint
-app.post("/api/analyze-table", async (req, res) => {
+app.post("/api/analyze-table", analyzeTableLimiter, async (req, res) => {
   const { tables } = req.body || {};
 
   const validation = validateTablesPayload(tables);
@@ -214,8 +244,9 @@ app.post("/api/analyze-table", async (req, res) => {
   }
 
   try {
+    const rawTables = tables as RawTablePayload[];
     // Step 1: Deterministic Statistical Profiling & Quality Analysis
-    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(tables);
+    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(rawTables);
 
     // Step 2: Check for Gemini Client
     const ai = getGenAI();
@@ -269,7 +300,7 @@ CRITICAL DIRECTIVES:
 ${compactSummary}`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: GEMINI_MODEL,
       contents: prompt,
       config: {
         responseMimeType: "application/json",

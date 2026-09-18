@@ -25,6 +25,14 @@ export interface ColumnMeta {
   profile?: ColumnProfile;
 }
 
+export interface RawTablePayload {
+  id?: string;
+  fileName?: string;
+  rowCount?: number;
+  rows?: unknown[];
+  sampleRows?: unknown[];
+}
+
 export interface ParsedTable {
   id: string;
   fileName: string;
