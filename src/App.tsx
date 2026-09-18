@@ -7,7 +7,7 @@ import { AIRecommendations } from "./components/AIRecommendations";
 import { PlotBuilder } from "./components/PlotBuilder";
 import { PlotCard } from "./components/PlotCard";
 import { PlotInspectModal } from "./components/PlotInspectModal";
-import { ConfirmModal } from "./components/ConfirmModal";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import {
   AIAnalysisResponse,
   AIRecommendation,
@@ -408,7 +408,7 @@ export default function App() {
       )}
 
       {/* Clear All Plots Confirmation Modal */}
-      <ConfirmModal
+      <ConfirmDialog
         isOpen={showClearConfirm}
         title="Clear All Visualizations"
         message="Are you sure you want to clear all plotted visualizations? This action cannot be undone."

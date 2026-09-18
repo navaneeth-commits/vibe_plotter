@@ -97,6 +97,39 @@ describe("Deterministic Statistical Profiler", () => {
     assert.equal(dataQuality.duplicateRowsCount, 1);
   });
 
+  test("profileDataset flags duplicate rows when objects have identical values but scrambled key insertion order", () => {
+    const row1: Record<string, unknown> = {};
+    row1.name = "Alice";
+    row1.age = 30;
+    row1.city = "San Francisco";
+    row1.active = true;
+
+    const row2: Record<string, unknown> = {};
+    row2.active = true;
+    row2.city = "San Francisco";
+    row2.name = "Alice";
+    row2.age = 30;
+
+    const row3: Record<string, unknown> = {};
+    row3.age = 30;
+    row3.name = "Alice";
+    row3.active = true;
+    row3.city = "San Francisco";
+
+    const row4: Record<string, unknown> = {};
+    row4.name = "Bob";
+    row4.age = 25;
+    row4.city = "Oakland";
+    row4.active = false;
+
+    // Verify raw JSON.stringify would fail on unordered keys
+    assert.notEqual(JSON.stringify(row1), JSON.stringify(row2));
+
+    const { dataQuality } = profileDataset("t_scrambled", "scrambled.csv", [row1, row2, row3, row4]);
+    assert.equal(dataQuality.totalRows, 4);
+    assert.equal(dataQuality.duplicateRowsCount, 2, "row2 and row3 are duplicates of row1");
+  });
+
   test("generateRowSignature produces identical signatures for rows with differing key orders", () => {
     const rowA = { z: 99, a: "test", m: null };
     const rowB = { a: "test", m: null, z: 99 };

@@ -501,8 +501,10 @@ export function computeDateStatistics(
  */
 export function generateRowSignature(row: Record<string, unknown>): string {
   if (!row || typeof row !== "object") return "";
-  const sortedKeys = Object.keys(row).sort();
-  return sortedKeys.map((k) => `${k}:${JSON.stringify(row[k])}`).join("|");
+  return Object.keys(row)
+    .sort()
+    .map((k) => `${k}:${JSON.stringify(row[k])}`)
+    .join("|");
 }
 
 /**
@@ -611,7 +613,7 @@ export function profileDataset(
   let duplicateRowsCount = 0;
   for (const row of rows) {
     if (!row || typeof row !== "object") continue;
-    const sig = generateRowSignature(row);
+    const sig = Object.keys(row).sort().map((k) => `${k}:${JSON.stringify(row[k])}`).join("|");
     if (rowSignatures.has(sig)) {
       duplicateRowsCount++;
     } else {
