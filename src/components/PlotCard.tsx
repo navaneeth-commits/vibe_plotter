@@ -66,6 +66,13 @@ export const PlotCard: React.FC<PlotCardProps> = ({
               >
                 {plot.plotType}
               </span>
+              {plot.trendline && plot.trendline !== "none" && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">
+                  {plot.trendline === "polynomial"
+                    ? `Poly Trend${plot.polynomialOrder ? ` (d=${plot.polynomialOrder})` : ""}`
+                    : "Linear Trend"}
+                </span>
+              )}
               {plot.isCrossFile && (
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-semibold">
                   Cross-File

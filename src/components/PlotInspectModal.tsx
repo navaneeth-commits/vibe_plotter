@@ -39,7 +39,7 @@ export const PlotInspectModal: React.FC<PlotInspectModalProps> = ({
   const primaryTable = tablesMap[plot.primaryTableId];
   const secondaryTable = plot.secondaryTableId ? tablesMap[plot.secondaryTableId] : null;
 
-  const { chartData, seriesKeys, xAxisKey } = prepareChartData(plot, tablesMap);
+  const { chartData, seriesKeys, xAxisKey, trendEquation, trendR2 } = prepareChartData(plot, tablesMap);
 
   // Calculate statistics for numeric series
   const stats = seriesKeys.map((key) => {
@@ -212,6 +212,27 @@ export const PlotInspectModal: React.FC<PlotInspectModalProps> = ({
                         </div>
                       </div>
                     ))}
+
+                    {plot.trendline && plot.trendline !== "none" && trendEquation && (
+                      <div className="p-3.5 rounded-xl border border-red-200 bg-red-50/40 font-mono text-xs space-y-1">
+                        <div className="font-bold text-red-900 truncate mb-1 border-b border-red-200 pb-1 flex items-center justify-between">
+                          <span>Trendline Regression</span>
+                          <span className="text-[10px] uppercase px-1.5 py-0.2 rounded bg-red-100 text-red-800">
+                            {plot.trendline}
+                          </span>
+                        </div>
+                        <div className="text-stone-700">
+                          <span className="text-stone-500 text-[11px] block">Equation:</span>
+                          <strong className="text-stone-900 break-all">{trendEquation}</strong>
+                        </div>
+                        {trendR2 !== undefined && (
+                          <div className="flex items-center justify-between text-stone-600 pt-1">
+                            <span>Goodness of Fit (R²):</span>
+                            <strong className="text-red-700">{trendR2.toFixed(4)}</strong>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

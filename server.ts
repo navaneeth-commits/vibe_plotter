@@ -78,7 +78,7 @@ function runDeterministicAnalysis(tables: RawTablePayload[]): {
       : Array.isArray(t.sampleRows)
       ? t.sampleRows
       : [];
-    const rows: Record<string, any>[] = (rawRows as Record<string, any>[]).slice(0, MAX_ROWS_PER_TABLE);
+    const rows: Record<string, any>[] = rawRows as Record<string, any>[];
 
     const { profile, dataQuality } = profileDataset(tableId, fileName, rows);
 
@@ -208,18 +208,25 @@ function validateTablesPayload(tables: unknown): { valid: boolean; error?: strin
     if (activeRows.length > 0 && typeof activeRows[0] !== "object") {
       return { valid: false, error: `Table at index ${i} contains non-object rows.` };
     }
-
-    if (activeRows.length > MAX_ROWS_PER_TABLE) {
-      if (Array.isArray(rows)) {
-        rawTable.rows = rows.slice(0, MAX_ROWS_PER_TABLE);
-      }
-      if (Array.isArray(sampleRows)) {
-        rawTable.sampleRows = sampleRows.slice(0, MAX_ROWS_PER_TABLE);
-      }
-    }
   }
 
   return { valid: true };
+}
+
+/**
+ * Pure function that truncates rows and sampleRows of each table to MAX_ROWS_PER_TABLE
+ * without mutating the original input array or table objects.
+ */
+export function truncateTableRows(tables: RawTablePayload[]): RawTablePayload[] {
+  return tables.map((table) => ({
+    ...table,
+    ...(Array.isArray(table.rows)
+      ? { rows: table.rows.slice(0, MAX_ROWS_PER_TABLE) }
+      : {}),
+    ...(Array.isArray(table.sampleRows)
+      ? { sampleRows: table.sampleRows.slice(0, MAX_ROWS_PER_TABLE) }
+      : {}),
+  }));
 }
 
 // Rate limiter for /api/analyze-table (triggers Gemini API calls)
@@ -243,10 +250,11 @@ app.post("/api/analyze-table", analyzeTableLimiter, async (req, res) => {
     return res.status(400).json({ error: validation.error });
   }
 
+  const sanitizedTables = truncateTableRows(tables as RawTablePayload[]);
+
   try {
-    const rawTables = tables as RawTablePayload[];
     // Step 1: Deterministic Statistical Profiling & Quality Analysis
-    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(rawTables);
+    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(sanitizedTables);
 
     // Step 2: Check for Gemini Client
     const ai = getGenAI();
@@ -378,8 +386,7 @@ ${compactSummary}`;
     console.error(`AI analysis pipeline error: ${safeErrorMsg}`);
 
     // Step 5: Graceful Fallback to Deterministic Profiler Engine
-    const safeTables = Array.isArray(tables) ? tables : [];
-    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(safeTables);
+    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(sanitizedTables);
     const recommendations = generateDeterministicRecommendations(profiles, crossFileAnalysis);
 
     const fallbackObservations: string[] = [];

@@ -26,6 +26,7 @@ import {
   ParsedTable,
   PlotConfig,
   PlotType,
+  TrendlineType,
 } from "../types";
 import { THEME_PALETTES } from "../utils/chartDataProcessor";
 
@@ -67,6 +68,8 @@ export const PlotBuilder: React.FC<PlotBuilderProps> = ({
   const [showLegend, setShowLegend] = useState<boolean>(true);
   const [showDataPoints, setShowDataPoints] = useState<boolean>(true);
   const [curveType, setCurveType] = useState<"monotone" | "linear" | "step">("monotone");
+  const [trendline, setTrendline] = useState<TrendlineType>("none");
+  const [polynomialOrder, setPolynomialOrder] = useState<number>(2);
 
   // Synchronize defaults when active table changes
   useEffect(() => {
@@ -115,6 +118,8 @@ export const PlotBuilder: React.FC<PlotBuilderProps> = ({
       if (prefillConfig.yAxisCols) setSelectedYCols(prefillConfig.yAxisCols);
       if (prefillConfig.theme) setTheme(prefillConfig.theme);
       if (prefillConfig.aggregation) setAggregation(prefillConfig.aggregation);
+      if (prefillConfig.trendline) setTrendline(prefillConfig.trendline);
+      if (prefillConfig.polynomialOrder) setPolynomialOrder(prefillConfig.polynomialOrder);
       if (prefillConfig.isCrossFile !== undefined && tables.length >= 2) {
         setIsCrossFile(prefillConfig.isCrossFile);
         if (prefillConfig.secondaryTableId) setSecondaryTableId(prefillConfig.secondaryTableId);
@@ -173,6 +178,14 @@ export const PlotBuilder: React.FC<PlotBuilderProps> = ({
       showLegend,
       showDataPoints,
       curveType,
+      trendline:
+        (plotType === "scatter" || plotType === "line") && trendline !== "none"
+          ? trendline
+          : undefined,
+      polynomialOrder:
+        (plotType === "scatter" || plotType === "line") && trendline === "polynomial"
+          ? polynomialOrder
+          : undefined,
       createdAt: Date.now(),
     };
 
@@ -560,6 +573,57 @@ export const PlotBuilder: React.FC<PlotBuilderProps> = ({
         </div>
       </div>
 
+      {/* 5. Trend Line Analysis (Available for Scatter and Line Charts) */}
+      {(plotType === "scatter" || plotType === "line") && (
+        <div className="p-4 rounded-xl border border-amber-300/80 bg-amber-50/40 space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold uppercase tracking-wider text-amber-950 flex items-center gap-1.5">
+              <TrendingUp className="w-4 h-4 text-amber-700" />
+              <span>Regression & Trend Line Analysis</span>
+            </label>
+            <span className="text-[11px] font-mono text-amber-800/90 bg-amber-100/60 px-2 py-0.5 rounded-md border border-amber-200">
+              Only valid numeric points used (ignoring nulls)
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-stone-700 mb-1">
+                Trend Line Model
+              </label>
+              <select
+                id="trendline-model-select"
+                value={trendline}
+                onChange={(e) => setTrendline(e.target.value as TrendlineType)}
+                className="w-full text-xs py-2 px-3 rounded-lg border border-stone-300 bg-white text-stone-900 cursor-pointer focus:outline-hidden focus:border-amber-500 font-mono"
+              >
+                <option value="none">None (No Trend Line)</option>
+                <option value="linear">Linear Trend (y = mx + b)</option>
+                <option value="polynomial">Polynomial Trend (Curved Fit)</option>
+              </select>
+            </div>
+
+            {trendline === "polynomial" && (
+              <div>
+                <label className="block text-xs font-semibold text-stone-700 mb-1">
+                  Polynomial Degree / Order
+                </label>
+                <select
+                  id="polynomial-order-select"
+                  value={polynomialOrder}
+                  onChange={(e) => setPolynomialOrder(Number(e.target.value))}
+                  className="w-full text-xs py-2 px-3 rounded-lg border border-stone-300 bg-white text-stone-900 cursor-pointer focus:outline-hidden focus:border-amber-500 font-mono"
+                >
+                  <option value={2}>Order 2 (Quadratic: ax² + bx + c)</option>
+                  <option value={3}>Order 3 (Cubic: ax³ + bx² + cx + d)</option>
+                  <option value={4}>Order 4 (Quartic)</option>
+                </select>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Selected Plot Summary Verification Banner */}
       <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex flex-wrap items-center justify-between text-xs font-mono text-stone-700 gap-2">
         <div className="flex items-center gap-2">
@@ -575,6 +639,17 @@ export const PlotBuilder: React.FC<PlotBuilderProps> = ({
           <span>
             Y: <strong className="text-stone-950">{selectedYCols.join(", ") || "Auto"}</strong>
           </span>
+          {(plotType === "scatter" || plotType === "line") && trendline !== "none" && (
+            <>
+              <span>•</span>
+              <span className="inline-flex items-center gap-1 text-amber-800">
+                <TrendingUp className="w-3.5 h-3.5 text-amber-700" />
+                <span>
+                  Trend: <strong>{trendline.toUpperCase()} {trendline === "polynomial" ? `(deg ${polynomialOrder})` : ""}</strong>
+                </span>
+              </span>
+            </>
+          )}
         </div>
         <span className="text-[11px] text-stone-500">
           Theme: <strong>{THEME_PALETTES[theme]?.label || theme}</strong>

@@ -40,7 +40,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
   containerId,
   height = 320,
 }) => {
-  const { chartData, seriesKeys, xAxisKey, palette } = prepareChartData(config, tablesMap);
+  const { chartData, seriesKeys, xAxisKey, palette, trendData, trendEquation, trendR2 } =
+    prepareChartData(config, tablesMap);
   const themeMeta = THEME_PALETTES[config.theme] || THEME_PALETTES["amber-craft"];
 
   if (!chartData || chartData.length === 0) {
@@ -64,17 +65,36 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
             {xAxisKey}: {label}
           </p>
           <div className="space-y-1">
-            {payload.map((entry: any, index: number) => (
-              <div key={`tooltip-${index}`} className="flex items-center justify-between gap-3 text-[11px]">
-                <span className="flex items-center gap-1.5 truncate">
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: entry.color || entry.fill }} />
-                  <span className="text-stone-300 truncate">{entry.name}:</span>
-                </span>
-                <span className="font-bold text-white shrink-0">
-                  {typeof entry.value === "number" ? entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : entry.value}
-                </span>
-              </div>
-            ))}
+            {payload.map((entry: any, index: number) => {
+              const isTrend =
+                String(entry.dataKey || "").startsWith("_trend_") ||
+                String(entry.name || "").includes("Trend");
+              return (
+                <div
+                  key={`tooltip-${index}`}
+                  className="flex items-center justify-between gap-3 text-[11px]"
+                >
+                  <span className="flex items-center gap-1.5 truncate">
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: entry.color || entry.fill }}
+                    />
+                    <span
+                      className={`truncate ${isTrend ? "text-amber-300 font-semibold" : "text-stone-300"}`}
+                    >
+                      {entry.name}:
+                    </span>
+                  </span>
+                  <span
+                    className={`font-bold shrink-0 ${isTrend ? "text-amber-300" : "text-white"}`}
+                  >
+                    {typeof entry.value === "number"
+                      ? entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                      : entry.value}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       );
@@ -104,15 +124,29 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
             <Tooltip content={<CustomTooltip />} />
             {config.showLegend && <Legend wrapperStyle={{ fontSize: 11, fontFamily: "monospace", paddingTop: 8 }} />}
             {seriesKeys.map((key, idx) => (
-              <Line
-                key={key}
-                type={config.curveType || "monotone"}
-                dataKey={key}
-                stroke={palette[idx % palette.length]}
-                strokeWidth={2.5}
-                dot={config.showDataPoints ? { r: 3.5, strokeWidth: 1.5, fill: "#FFFFFF" } : false}
-                activeDot={{ r: 6 }}
-              />
+              <React.Fragment key={key}>
+                <Line
+                  type={config.curveType || "monotone"}
+                  dataKey={key}
+                  stroke={palette[idx % palette.length]}
+                  strokeWidth={2.5}
+                  dot={config.showDataPoints ? { r: 3.5, strokeWidth: 1.5, fill: "#FFFFFF" } : false}
+                  activeDot={{ r: 6 }}
+                />
+                {config.trendline && config.trendline !== "none" && (
+                  <Line
+                    type={config.trendline === "polynomial" ? "monotone" : "linear"}
+                    dataKey={`_trend_${key}`}
+                    name={`${key} (${config.trendline === "polynomial" ? `Poly Trend${config.polynomialOrder ? ` Deg ${config.polynomialOrder}` : ""}` : "Linear Trend"})`}
+                    stroke={palette[idx % palette.length]}
+                    strokeWidth={2}
+                    strokeDasharray="6 4"
+                    dot={false}
+                    activeDot={{ r: 4 }}
+                    connectNulls
+                  />
+                )}
+              </React.Fragment>
             ))}
           </LineChart>
         );
@@ -187,6 +221,16 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
                 <Cell key={`cell-${index}`} fill={palette[index % palette.length]} />
               ))}
             </Scatter>
+            {config.trendline && config.trendline !== "none" && trendData && trendData.length > 0 && (
+              <Scatter
+                name={`Trend (${config.trendline === "polynomial" ? `Poly Deg ${config.polynomialOrder || 2}` : "Linear"})`}
+                data={trendData}
+                line={{ stroke: "#DC2626", strokeWidth: 2, strokeDasharray: "5 5" }}
+                shape={() => null}
+                legendType="line"
+                isAnimationActive={false}
+              />
+            )}
           </ScatterChart>
         );
       }
@@ -314,6 +358,17 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({
       style={{ backgroundColor: themeMeta.bg }}
       className="w-full rounded-xl transition-all relative overflow-hidden"
     >
+      {config.trendline && config.trendline !== "none" && trendEquation && (
+        <div className="absolute top-2 right-3 z-10 pointer-events-none bg-white/95 backdrop-blur-xs border border-stone-200/90 rounded-md px-2 py-0.5 shadow-2xs text-[10px] font-mono text-stone-700 flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+          <span>
+            Trend: <strong className="text-stone-900">{trendEquation}</strong>
+          </span>
+          {trendR2 !== undefined && (
+            <span className="text-stone-500 font-semibold">(R² = {trendR2.toFixed(2)})</span>
+          )}
+        </div>
+      )}
       <ResponsiveContainer width="100%" height={height}>
         {renderPlot()}
       </ResponsiveContainer>

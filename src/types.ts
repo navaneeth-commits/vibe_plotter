@@ -48,6 +48,8 @@ export interface ParsedTable {
 
 export type ImageFormat = "png" | "jpeg" | "jpg";
 
+export type TrendlineType = "none" | "linear" | "polynomial";
+
 export interface PlotConfig {
   id: string;
   title: string;
@@ -86,6 +88,8 @@ export interface PlotConfig {
   showLegend: boolean;
   showDataPoints: boolean;
   curveType: "monotone" | "linear" | "step";
+  trendline?: TrendlineType;
+  polynomialOrder?: number;
   createdAt: number;
 }
 

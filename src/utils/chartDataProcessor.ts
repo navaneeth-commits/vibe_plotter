@@ -1,4 +1,5 @@
 import { ChartTheme, PlotConfig, ParsedTable } from "../types";
+import { calculateTrendline, TrendlineResult } from "./trendline";
 
 export interface PreparedChartData {
   chartData: Record<string, any>[];
@@ -7,6 +8,10 @@ export interface PreparedChartData {
   palette: string[];
   yMin?: number;
   yMax?: number;
+  trendData?: Record<string, any>[];
+  trendResults?: Record<string, TrendlineResult>;
+  trendEquation?: string;
+  trendR2?: number;
 }
 
 export const THEME_PALETTES: Record<ChartTheme, { colors: string[]; bg: string; border: string; text: string; label: string }> = {
@@ -316,12 +321,15 @@ export function prepareChartData(
       ...(y2Col ? [`[${secondaryTable.fileName}] ${y2Col}`] : []),
     ];
 
-    return {
-      chartData: merged,
-      seriesKeys,
-      xAxisKey: matchedPrimaryKey,
-      palette,
-    };
+    return attachTrendlinesToPreparedData(
+      {
+        chartData: merged,
+        seriesKeys,
+        xAxisKey: matchedPrimaryKey,
+        palette,
+      },
+      config
+    );
   }
 
   // 4. STANDARD SINGLE-TABLE PLOTTING (With Aggregation if requested)
@@ -397,12 +405,15 @@ export function prepareChartData(
       aggregated.push(rowObj);
     });
 
-    return {
-      chartData: aggregated,
-      seriesKeys: yCols,
-      xAxisKey: xCol,
-      palette,
-    };
+    return attachTrendlinesToPreparedData(
+      {
+        chartData: aggregated,
+        seriesKeys: yCols,
+        xAxisKey: xCol,
+        palette,
+      },
+      config
+    );
   }
 
   // 5. DIRECT ROW MAPPING (No aggregation)
@@ -422,10 +433,163 @@ export function prepareChartData(
     return item;
   });
 
-  return {
-    chartData,
-    seriesKeys: yCols,
-    xAxisKey: xCol,
-    palette,
-  };
+  return attachTrendlinesToPreparedData(
+    {
+      chartData,
+      seriesKeys: yCols,
+      xAxisKey: xCol,
+      palette,
+    },
+    config
+  );
+}
+
+/**
+ * Enriches prepared chart data with calculated trend lines for line and scatter plots.
+ * Strictly calculates using only valid numeric points (ignoring nulls, NaNs, and non-numeric values).
+ */
+export function attachTrendlinesToPreparedData(
+  prepared: PreparedChartData,
+  config: PlotConfig
+): PreparedChartData {
+  if (
+    !config.trendline ||
+    config.trendline === "none" ||
+    (config.plotType !== "scatter" && config.plotType !== "line") ||
+    !prepared.chartData ||
+    prepared.chartData.length === 0
+  ) {
+    return prepared;
+  }
+
+  const { chartData, seriesKeys, xAxisKey } = prepared;
+  const polyOrder = config.polynomialOrder || 2;
+
+  // 1. SCATTER PLOTS
+  if (config.plotType === "scatter") {
+    const yKey = seriesKeys[0] || xAxisKey;
+    if (!yKey) return prepared;
+
+    // Filter ONLY valid numeric points (strictly ignoring nulls)
+    const validPoints: { x: number; y: number }[] = [];
+    for (const row of chartData) {
+      const rawX = cleanNumber(row[xAxisKey]);
+      const rawY = cleanNumber(row[yKey]);
+      if (rawX !== null && rawY !== null && Number.isFinite(rawX) && Number.isFinite(rawY)) {
+        validPoints.push({ x: rawX, y: rawY });
+      }
+    }
+
+    const minRequiredPoints = config.trendline === "polynomial" ? 3 : 2;
+    if (validPoints.length < minRequiredPoints) {
+      if (validPoints.length === 1) {
+        const pt = validPoints[0];
+        return {
+          ...prepared,
+          trendData: [{ [xAxisKey]: pt.x, [yKey]: pt.y }],
+          trendEquation: `y = ${pt.y.toFixed(2)}`,
+          trendR2: 1,
+        };
+      }
+      return prepared;
+    }
+
+    const trend = calculateTrendline(validPoints, config.trendline, polyOrder);
+    if (!trend) return prepared;
+
+    const xVals = validPoints.map((p) => p.x);
+    const minX = Math.min(...xVals);
+    const maxX = Math.max(...xVals);
+
+    const pointCount = config.trendline === "polynomial" ? 50 : 2;
+    const trendData: Record<string, any>[] = [];
+
+    if (minX === maxX) {
+      trendData.push({
+        [xAxisKey]: minX,
+        [yKey]: Math.round(trend.predict(minX) * 100) / 100,
+      });
+    } else {
+      const step = (maxX - minX) / (pointCount - 1);
+      for (let i = 0; i < pointCount; i++) {
+        const sampleX = minX + i * step;
+        const predY = trend.predict(sampleX);
+        trendData.push({
+          [xAxisKey]: Math.round(sampleX * 1000) / 1000,
+          [yKey]: Math.round(predY * 1000) / 1000,
+        });
+      }
+    }
+
+    return {
+      ...prepared,
+      trendData,
+      trendEquation: trend.equation,
+      trendR2: trend.r2,
+      trendResults: { [yKey]: trend },
+    };
+  }
+
+  // 2. LINE PLOTS
+  if (config.plotType === "line") {
+    // Determine whether X column contains numeric values
+    let numericXCount = 0;
+    for (const r of chartData) {
+      if (cleanNumber(r[xAxisKey]) !== null) {
+        numericXCount++;
+      }
+    }
+    const isXNumeric = numericXCount >= Math.min(chartData.length, 3) && numericXCount > 0;
+
+    const trendResults: Record<string, TrendlineResult> = {};
+    let primaryEquation: string | undefined;
+    let primaryR2: number | undefined;
+
+    const enrichedChartData = chartData.map((r) => ({ ...r }));
+
+    seriesKeys.forEach((key, sIdx) => {
+      const validPoints: { x: number; y: number }[] = [];
+
+      enrichedChartData.forEach((row, idx) => {
+        const rawY = cleanNumber(row[key]);
+        if (rawY !== null && Number.isFinite(rawY)) {
+          const rawX = isXNumeric ? cleanNumber(row[xAxisKey]) : idx;
+          if (rawX !== null && Number.isFinite(rawX)) {
+            validPoints.push({ x: rawX, y: rawY });
+          }
+        }
+      });
+
+      const minRequired = config.trendline === "polynomial" ? 3 : 2;
+      if (validPoints.length >= minRequired) {
+        const trend = calculateTrendline(validPoints, config.trendline, polyOrder);
+        if (trend) {
+          trendResults[key] = trend;
+          if (sIdx === 0) {
+            primaryEquation = trend.equation;
+            primaryR2 = trend.r2;
+          }
+
+          enrichedChartData.forEach((row, idx) => {
+            const rawX = isXNumeric ? cleanNumber(row[xAxisKey]) : idx;
+            if (rawX !== null && Number.isFinite(rawX)) {
+              row[`_trend_${key}`] = Math.round(trend.predict(rawX) * 100) / 100;
+            } else {
+              row[`_trend_${key}`] = null;
+            }
+          });
+        }
+      }
+    });
+
+    return {
+      ...prepared,
+      chartData: enrichedChartData,
+      trendResults,
+      trendEquation: primaryEquation,
+      trendR2: primaryR2,
+    };
+  }
+
+  return prepared;
 }
