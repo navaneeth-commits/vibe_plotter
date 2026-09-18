@@ -66,18 +66,34 @@ export function validateAndRepairRecommendation(
 
   // Check plotType constraints
   if (plotType === "scatter") {
-    // Scatter requires numeric x-axis
+    // Scatter requires numeric continuous x-axis
     if (xCol.inferredType !== "numeric") {
       plotType = "bar"; // gracefully repair to bar chart
     }
   } else if (plotType === "pie") {
-    // Pie requires categorical x-axis with low/medium cardinality
-    if (xCol.uniqueCount > 15 || xCol.inferredType === "numeric") {
+    // Pie requires categorical x-axis with low cardinality (2 to 7) and non-negative metric
+    const hasNegatives = (yCol.numericStats?.negativesCount || 0) > 0;
+    if (xCol.uniqueCount > 7 || xCol.uniqueCount < 2 || xCol.inferredType === "numeric" || xCol.inferredType === "id" || hasNegatives) {
       plotType = "bar";
     }
   } else if (plotType === "histogram") {
     if (xCol.inferredType !== "numeric") {
       xAxis = yAxis;
+      xCol = yCol;
+    }
+    if (xCol.uniqueCount < 4) {
+      plotType = "bar";
+    }
+  }
+
+  // Prevent plotting an identifier column directly as categorical bar chart if alternatives exist
+  if ((plotType === "bar" || plotType === "line") && xCol.inferredType === "id" && xCol.uniqueCount > 15) {
+    const betterCat = profile.columns.find((c) => c.inferredType === "category" && c.uniqueCount >= 2 && c.uniqueCount <= 15);
+    const betterDate = profile.columns.find((c) => c.inferredType === "date");
+    const alternative = betterDate || betterCat;
+    if (alternative) {
+      xAxis = alternative.name;
+      xCol = alternative;
     }
   }
 
@@ -137,7 +153,22 @@ export function validateAndRepairRecommendation(
   description = description
     .replace(/\bcauses\b/gi, "is associated with")
     .replace(/\bproves\b/gi, "indicates")
-    .replace(/\bcausality\b/gi, "association");
+    .replace(/\bcausality\b/gi, "association")
+    .replace(/\bdetermines\b/gi, "corresponds to")
+    .replace(/\bdrives\b/gi, "relates to");
+
+  // If correlation is mentioned, verify that correlation was computed between these axes
+  const hasCorrelation = profile.correlations.some(
+    (c) =>
+      (c.col1.toLowerCase() === xAxis.toLowerCase() && c.col2.toLowerCase() === yAxis.toLowerCase()) ||
+      (c.col2.toLowerCase() === xAxis.toLowerCase() && c.col1.toLowerCase() === yAxis.toLowerCase())
+  );
+  if (!hasCorrelation && plotType !== "scatter") {
+    description = description
+      .replace(/\bcorrelated\b/gi, "associated")
+      .replace(/\bcorrelation\b/gi, "relationship")
+      .replace(/\bcorrelates with\b/gi, "relates to");
+  }
 
   let reason = typeof rec.reason === "string" && rec.reason.trim().length > 0
     ? rec.reason.trim()

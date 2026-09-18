@@ -92,14 +92,28 @@ export function prepareChartData(
     const targetCol = yCols[0] || xCol;
     const values = rows
       .map((r) => cleanNumber(r[targetCol]))
-      .filter((v) => !isNaN(v) && v !== null);
+      .filter((v) => Number.isFinite(v) && !isNaN(v));
 
     if (values.length === 0) {
       return { chartData: [], seriesKeys: ["Frequency"], xAxisKey: "bin", palette };
     }
 
-    const min = Math.min(...values);
-    const max = Math.max(...values);
+    let min = values[0];
+    let max = values[0];
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] < min) min = values[i];
+      if (values[i] > max) max = values[i];
+    }
+
+    if (min === max) {
+      return {
+        chartData: [{ bin: `${min}`, Frequency: values.length, minVal: min, maxVal: max }],
+        seriesKeys: ["Frequency"],
+        xAxisKey: "bin",
+        palette,
+      };
+    }
+
     const binCount = Math.min(10, Math.max(5, Math.round(Math.sqrt(values.length))));
     const binWidth = (max - min) / (binCount || 1);
 
@@ -133,8 +147,8 @@ export function prepareChartData(
 
     rows.forEach((r) => {
       const label = String(r[xCol] !== undefined && r[xCol] !== null ? r[xCol] : "Other");
-      const val = targetMetric ? cleanNumber(r[targetMetric]) : 1;
-      sliceMap.set(label, (sliceMap.get(label) || 0) + Math.abs(val));
+      const val = targetMetric ? Math.max(0, cleanNumber(r[targetMetric])) : 1;
+      sliceMap.set(label, (sliceMap.get(label) || 0) + val);
     });
 
     // Convert map to array and sort descending
@@ -157,35 +171,50 @@ export function prepareChartData(
     };
   }
 
-  // 3. CROSS-FILE PLOTTING
+  // 3. CROSS-FILE PLOTTING (Key-based alignment)
   if (config.isCrossFile && config.secondaryTableId) {
     const secondaryTable = tablesMap[config.secondaryTableId];
     if (secondaryTable) {
       const pRows = primaryTable.rows;
       const sRows = secondaryTable.rows;
-      const merged: Record<string, any>[] = [];
+
+      // Identify join key in secondary table
+      const primaryKey = xCol;
+      const secColMatch = secondaryTable.columns.find(
+        (c) => c.name.toLowerCase().trim() === primaryKey.toLowerCase().trim()
+      );
+      const secKey = secColMatch ? secColMatch.name : (secondaryTable.columns[0]?.name || primaryKey);
+
+      // Index secondary table by key
+      const sMap = new Map<string, Record<string, any>>();
+      sRows.forEach((sr) => {
+        const keyVal = String(sr[secKey] !== undefined ? sr[secKey] : "").trim().toLowerCase();
+        if (keyVal && !sMap.has(keyVal)) {
+          sMap.set(keyVal, sr);
+        }
+      });
 
       const y1Cols = yCols;
       const y2Col = config.secondaryYAxisCol;
 
-      const maxLen = Math.max(pRows.length, sRows.length);
-      for (let i = 0; i < maxLen; i++) {
-        const pR = pRows[i] || {};
-        const sR = sRows[i] || {};
+      const merged: Record<string, any>[] = [];
+      pRows.forEach((pR, idx) => {
+        const rawX = pR[primaryKey] !== undefined ? pR[primaryKey] : `Row ${idx + 1}`;
+        const lookupKey = String(rawX).trim().toLowerCase();
+        const sR = sMap.get(lookupKey);
 
-        const xVal = pR[xCol] !== undefined ? pR[xCol] : (sR[xCol] !== undefined ? sR[xCol] : `Row ${i + 1}`);
-        const rowObj: Record<string, any> = { [xCol]: xVal };
+        const rowObj: Record<string, any> = { [primaryKey]: rawX };
 
         y1Cols.forEach((yCol) => {
           rowObj[`[${primaryTable.fileName}] ${yCol}`] = cleanNumber(pR[yCol]);
         });
 
         if (y2Col) {
-          rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = cleanNumber(sR[y2Col]);
+          rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = sR ? cleanNumber(sR[y2Col]) : 0;
         }
 
         merged.push(rowObj);
-      }
+      });
 
       const seriesKeys = [
         ...y1Cols.map((yCol) => `[${primaryTable.fileName}] ${yCol}`),
@@ -195,7 +224,7 @@ export function prepareChartData(
       return {
         chartData: merged,
         seriesKeys,
-        xAxisKey: xCol,
+        xAxisKey: primaryKey,
         palette,
       };
     }

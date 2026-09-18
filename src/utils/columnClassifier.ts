@@ -19,6 +19,8 @@ export function classifyColumns(rows: Record<string, any>[]): ColumnMeta[] {
     if (col.inferredType === "numeric") uiType = "numeric";
     else if (col.inferredType === "date") uiType = "date";
     else if (col.inferredType === "id") uiType = "id";
+    else if (col.inferredType === "boolean") uiType = "boolean";
+    else if (col.inferredType === "text") uiType = "text";
     else uiType = "category";
 
     const meta: ColumnMeta = {

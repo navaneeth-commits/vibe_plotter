@@ -126,14 +126,28 @@ export function inferColumnType(
     return "date";
   }
 
+  // Check for ZIP / Postal code patterns (e.g., 90210, 02138, SW1A 1AA)
+  const isZipColumn =
+    nameLower.includes("zip") ||
+    nameLower.includes("postal") ||
+    nameLower.includes("postcode") ||
+    nameLower.includes("pincode");
+  if (isZipColumn) {
+    return "id";
+  }
+
   // Numeric check
   const numericValues = nonNull.map((v) => {
-    if (typeof v === "number") return isNaN(v) ? null : v;
+    if (typeof v === "boolean") return null;
+    if (typeof v === "number") return (isNaN(v) || !isFinite(v)) ? null : v;
     if (typeof v === "string") {
-      const cleaned = v.trim().replace(/[$,%]/g, "").replace(/,/g, "");
-      if (cleaned === "") return null;
+      const trimmed = v.trim();
+      // Values with leading zeros like "00123" are codes/IDs, not continuous numbers
+      if (/^0\d{2,}/.test(trimmed)) return null;
+      const cleaned = trimmed.replace(/[$€£¥%]/g, "").replace(/,/g, "");
+      if (cleaned === "" || cleaned === "-" || cleaned === ".") return null;
       const num = Number(cleaned);
-      return isNaN(num) ? null : num;
+      return (isNaN(num) || !isFinite(num)) ? null : num;
     }
     return null;
   });
@@ -142,17 +156,57 @@ export function inferColumnType(
   const isMostlyNumeric = validNumbers.length / nonNull.length >= 0.85;
 
   if (isMostlyNumeric) {
-    // Check if this numeric column is actually an identifier (e.g. ID, code, zipcode, or sequence)
     const uniqueNumCount = new Set(validNumbers).size;
-    const isNamedLikeId =
-      nameLower === "id" ||
-      nameLower.endsWith("_id") ||
-      nameLower.endsWith("id") ||
-      nameLower.includes("uuid") ||
-      nameLower.includes("identifier") ||
-      nameLower.includes("code");
 
-    if (isNamedLikeId && uniqueNumCount / nonNull.length >= 0.7) {
+    // Financial/metric keywords should never be mistakenly flagged as IDs
+    const isExplicitFinancialOrMetric =
+      nameLower.includes("amount") ||
+      nameLower.includes("price") ||
+      nameLower.includes("cost") ||
+      nameLower.includes("revenue") ||
+      nameLower.includes("salary") ||
+      nameLower.includes("profit") ||
+      nameLower.includes("rate") ||
+      nameLower.includes("total") ||
+      nameLower.includes("fee") ||
+      nameLower.includes("score") ||
+      nameLower.includes("weight") ||
+      nameLower.includes("height") ||
+      nameLower.includes("temp") ||
+      nameLower.includes("count") ||
+      nameLower.includes("quantity") ||
+      nameLower.includes("sales") ||
+      nameLower.includes("spend") ||
+      nameLower.includes("budget");
+
+    const isNamedLikeId =
+      !isExplicitFinancialOrMetric &&
+      (nameLower === "id" ||
+        nameLower.startsWith("id_") ||
+        nameLower.endsWith("_id") ||
+        nameLower.endsWith(" id") ||
+        nameLower === "uuid" ||
+        nameLower === "guid" ||
+        nameLower.includes("identifier") ||
+        nameLower.endsWith("_code") ||
+        (nameLower.endsWith("code") && !nameLower.includes("encode")) ||
+        nameLower === "ssn" ||
+        nameLower === "ein");
+
+    // Sequential row index detection (e.g. 1, 2, 3, 4, ... N)
+    const isIndexName =
+      nameLower === "index" ||
+      nameLower === "#" ||
+      nameLower === "no" ||
+      nameLower === "num" ||
+      nameLower === "row" ||
+      nameLower === "row_num";
+    const isSequentialIndex =
+      isIndexName &&
+      uniqueNumCount === validNumbers.length &&
+      validNumbers.length >= 3;
+
+    if ((isNamedLikeId && uniqueNumCount / nonNull.length >= 0.7) || isSequentialIndex) {
       return "id";
     }
 
@@ -164,9 +218,10 @@ export function inferColumnType(
   const uniqueCount = new Set(stringVals).size;
   const isNamedLikeId =
     nameLower === "id" ||
+    nameLower.startsWith("id_") ||
     nameLower.endsWith("_id") ||
-    nameLower.endsWith("id") ||
-    nameLower.includes("uuid") ||
+    nameLower.endsWith(" id") ||
+    nameLower === "uuid" ||
     nameLower.includes("identifier");
 
   if (isNamedLikeId && uniqueCount / nonNull.length >= 0.7) {
@@ -184,6 +239,7 @@ export function inferColumnType(
 
 /**
  * Calculates detailed numeric statistics.
+ * Defensively guards against NaN, Infinity, zero variance, and small sample sizes.
  */
 export function computeNumericStatistics(
   rawValues: unknown[]
@@ -193,7 +249,7 @@ export function computeNumericStatistics(
   let nullCount = 0;
 
   for (const v of rawValues) {
-    if (isNilOrEmpty(v)) {
+    if (isNilOrEmpty(v) || typeof v === "boolean") {
       nullCount++;
       continue;
     }
@@ -201,7 +257,11 @@ export function computeNumericStatistics(
       if (!isNaN(v) && isFinite(v)) validNumbers.push(v);
       else nullCount++;
     } else if (typeof v === "string") {
-      const cleaned = v.trim().replace(/[$,%]/g, "").replace(/,/g, "");
+      const cleaned = v.trim().replace(/[$€£¥%]/g, "").replace(/,/g, "");
+      if (cleaned === "" || cleaned === "-" || cleaned === ".") {
+        nullCount++;
+        continue;
+      }
       const num = Number(cleaned);
       if (!isNaN(num) && isFinite(num)) validNumbers.push(num);
       else nullCount++;
@@ -218,7 +278,7 @@ export function computeNumericStatistics(
       count,
       validCount: 0,
       nullCount,
-      nullPercentage,
+      nullPercentage: Math.round(nullPercentage * 10) / 10,
       min: 0,
       max: 0,
       mean: 0,
@@ -252,12 +312,16 @@ export function computeNumericStatistics(
     const squaredDiffs = sorted.map((v) => Math.pow(v - mean, 2));
     variance = squaredDiffs.reduce((a, b) => a + b, 0) / (validCount - 1);
   }
-  const standardDeviation = Math.sqrt(variance);
+  const standardDeviation = Math.sqrt(Math.max(0, variance));
 
-  // Outlier detection using IQR fences
+  // Robust IQR Outlier Detection:
+  // Outliers require sufficient data (validCount >= 4) and non-zero IQR.
   const lowerFence = q1 - 1.5 * iqr;
   const upperFence = q3 + 1.5 * iqr;
-  const outliers = sorted.filter((v) => v < lowerFence || v > upperFence);
+  const hasSufficientDataForOutliers = validCount >= 4 && iqr > 0.000001;
+  const outliers = hasSufficientDataForOutliers
+    ? sorted.filter((v) => v < lowerFence || v > upperFence)
+    : [];
 
   // Zeros & Negatives
   const zerosCount = sorted.filter((v) => v === 0).length;
@@ -268,23 +332,27 @@ export function computeNumericStatistics(
   if (validCount >= 3 && standardDeviation > 0.000001) {
     const cubedDiffs = sorted.map((v) => Math.pow((v - mean) / standardDeviation, 3));
     const m3 = cubedDiffs.reduce((a, b) => a + b, 0);
-    skewness = (validCount / ((validCount - 1) * (validCount - 2))) * m3;
-    skewness = Math.round(skewness * 1000) / 1000;
+    const skewVal = (validCount / ((validCount - 1) * (validCount - 2))) * m3;
+    if (Number.isFinite(skewVal) && !Number.isNaN(skewVal)) {
+      skewness = Math.round(skewVal * 1000) / 1000;
+    }
   }
+
+  const safeNum = (val: number): number => (Number.isFinite(val) && !Number.isNaN(val) ? val : 0);
 
   return {
     count,
     validCount,
     nullCount,
-    nullPercentage: Math.round(nullPercentage * 10) / 10,
-    min: Math.round(min * 1000) / 1000,
-    max: Math.round(max * 1000) / 1000,
-    mean: Math.round(mean * 1000) / 1000,
-    median: Math.round(median * 1000) / 1000,
-    standardDeviation: Math.round(standardDeviation * 1000) / 1000,
-    q1: Math.round(q1 * 1000) / 1000,
-    q3: Math.round(q3 * 1000) / 1000,
-    iqr: Math.round(iqr * 1000) / 1000,
+    nullPercentage: Math.round(safeNum(nullPercentage) * 10) / 10,
+    min: Math.round(safeNum(min) * 1000) / 1000,
+    max: Math.round(safeNum(max) * 1000) / 1000,
+    mean: Math.round(safeNum(mean) * 1000) / 1000,
+    median: Math.round(safeNum(median) * 1000) / 1000,
+    standardDeviation: Math.round(safeNum(standardDeviation) * 1000) / 1000,
+    q1: Math.round(safeNum(q1) * 1000) / 1000,
+    q3: Math.round(safeNum(q3) * 1000) / 1000,
+    iqr: Math.round(safeNum(iqr) * 1000) / 1000,
     zerosCount,
     negativesCount,
     possibleOutliersCount: outliers.length,

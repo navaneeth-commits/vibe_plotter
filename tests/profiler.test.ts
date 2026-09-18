@@ -16,6 +16,8 @@ import {
 } from "../src/utils/profiler/relationshipAnalyzer";
 import { generateDeterministicRecommendations } from "../src/utils/profiler/recommendationEngine";
 import { validateAndRepairRecommendation, validateRecommendations } from "../src/utils/profiler/recommendationValidator";
+import { prepareChartData } from "../src/utils/chartDataProcessor";
+import { ParsedTable, PlotConfig } from "../src/types";
 
 describe("Deterministic Statistical Profiler", () => {
   test("computes correct numeric statistics: min, max, mean, median, stdDev, quartiles", () => {
@@ -227,5 +229,123 @@ describe("Deterministic Fallback & Recommendation Validation", () => {
     assert.equal(validated.plotType, "bar");
     // "causes" should be sanitized
     assert.ok(!validated.description.includes("causes"));
+  });
+
+  test("repairs pie charts with negative metrics or high cardinality to bar charts", () => {
+    const rows = [
+      { Category: "A", Profit: -50 },
+      { Category: "B", Profit: 100 },
+      { Category: "C", Profit: 200 },
+    ];
+    const { profile } = profileDataset("t1", "p.csv", rows);
+    const rec = {
+      title: "Profit Share",
+      plotType: "pie",
+      fileIndex: 0,
+      xAxis: "Category",
+      yAxis: "Profit",
+    };
+
+    const validated = validateAndRepairRecommendation(rec, [profile], []);
+    assert.ok(validated !== null);
+    assert.equal(validated.plotType, "bar");
+  });
+});
+
+describe("Statistical Edge Cases & Data Pipeline Integrity", () => {
+  test("returns null for Pearson correlation on zero variance / constant arrays", () => {
+    const x = [5, 5, 5, 5, 5];
+    const y = [1, 2, 3, 4, 5];
+    const res = computePearsonCorrelation(x, y);
+    assert.equal(res, null);
+  });
+
+  test("suppresses outliers when sample size is too small (N < 4)", () => {
+    const data = [1, 2, 1000];
+    const stats = computeNumericStatistics(data);
+    assert.equal(stats.possibleOutliersCount, 0);
+    assert.equal(stats.sampleOutliers.length, 0);
+  });
+
+  test("classifies financial metric columns as numeric, never mistakenly as id", () => {
+    assert.equal(inferColumnType("amount_paid", [10.5, 20.0, 30.2], 3), "numeric");
+    assert.equal(inferColumnType("unit_price", [99, 149, 199], 3), "numeric");
+    assert.equal(inferColumnType("total_revenue", [1000, 2000, 3000], 3), "numeric");
+    assert.equal(inferColumnType("bid", [1.5, 2.5, 3.5], 3), "numeric");
+    assert.equal(inferColumnType("zip_code", ["90210", "10001", "02138"], 3), "id");
+  });
+
+  test("performs key-based cross-file join accurately in prepareChartData", () => {
+    const table1: ParsedTable = {
+      id: "tbl_sales",
+      fileName: "sales.csv",
+      fileSize: 1024,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 3,
+      columns: [
+        { name: "Quarter", type: "date", sampleValues: ["2023-Q1"], uniqueCount: 3, nonEmptyCount: 3 },
+        { name: "Revenue", type: "numeric", sampleValues: [100], uniqueCount: 3, nonEmptyCount: 3 },
+      ],
+      rows: [
+        { Quarter: "2023-Q1", Revenue: 100 },
+        { Quarter: "2023-Q2", Revenue: 150 },
+        { Quarter: "2023-Q3", Revenue: 200 },
+      ],
+    };
+
+    const table2: ParsedTable = {
+      id: "tbl_costs",
+      fileName: "costs.csv",
+      fileSize: 1024,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 3,
+      columns: [
+        { name: "Quarter", type: "date", sampleValues: ["2023-Q1"], uniqueCount: 3, nonEmptyCount: 3 },
+        { name: "Expenses", type: "numeric", sampleValues: [60], uniqueCount: 3, nonEmptyCount: 3 },
+      ],
+      rows: [
+        // Out of order to verify true key matching
+        { Quarter: "2023-Q3", Expenses: 120 },
+        { Quarter: "2023-Q1", Expenses: 60 },
+        { Quarter: "2023-Q2", Expenses: 90 },
+      ],
+    };
+
+    const config: PlotConfig = {
+      id: "p1",
+      title: "Cross Revenue vs Expenses",
+      plotType: "composed",
+      primaryTableId: "tbl_sales",
+      xAxisCol: "Quarter",
+      yAxisCols: ["Revenue"],
+      isCrossFile: true,
+      secondaryTableId: "tbl_costs",
+      secondaryYAxisCol: "Expenses",
+      aggregation: "none",
+      theme: "amber-craft",
+      showGrid: true,
+      showLegend: true,
+      showDataPoints: true,
+      curveType: "monotone",
+      createdAt: Date.now(),
+    };
+
+    const { chartData } = prepareChartData(config, {
+      tbl_sales: table1,
+      tbl_costs: table2,
+    });
+
+    assert.equal(chartData.length, 3);
+    const q1 = chartData.find((r) => r.Quarter === "2023-Q1");
+    assert.ok(q1);
+    assert.equal(q1["[sales.csv] Revenue"], 100);
+    assert.equal(q1["[costs.csv] Expenses"], 60);
+
+    const q3 = chartData.find((r) => r.Quarter === "2023-Q3");
+    assert.ok(q3);
+    assert.equal(q3["[sales.csv] Revenue"], 200);
+    assert.equal(q3["[costs.csv] Expenses"], 120);
   });
 });

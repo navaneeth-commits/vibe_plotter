@@ -15,6 +15,14 @@ import {
 } from "./types";
 import { getInitializedSampleTables } from "./utils/sampleData";
 import { profileDataset } from "./utils/profiler/statisticalProfiler";
+import {
+  analyzeCorrelations,
+  analyzeGroupRelationships,
+  analyzeTemporalRelationships,
+  analyzeCrossFileCompatibility,
+} from "./utils/profiler/relationshipAnalyzer";
+import { generateDeterministicRecommendations } from "./utils/profiler/recommendationEngine";
+import { DatasetProfile, CrossFileCompatibility } from "./utils/profiler/types";
 import { BarChart3, Compass } from "lucide-react";
 
 export default function App() {
@@ -64,7 +72,52 @@ export default function App() {
       const data: AIAnalysisResponse = await res.json();
       setAiAnalysis(data);
     } catch (err) {
-      console.error("Failed to analyze table with AI:", err);
+      console.warn("Backend AI request failed; falling back to deterministic client-side engine:", err);
+      try {
+        const profiles: DatasetProfile[] = [];
+        const crossFileCompatibilities: CrossFileCompatibility[] = [];
+
+        tablesToAnalyze.forEach((t) => {
+          const { profile, dataQuality } = profileDataset(t.id, t.fileName, t.rows);
+          const numCols = profile.columns.filter((c) => c.inferredType === "numeric").map((c) => c.name);
+          const catCols = profile.columns.filter((c) => c.inferredType === "category").map((c) => c.name);
+          const dateCols = profile.columns.filter((c) => c.inferredType === "date").map((c) => c.name);
+
+          profile.correlations = analyzeCorrelations(t.rows, numCols);
+          profile.groupRelationships = analyzeGroupRelationships(t.rows, catCols, numCols);
+          profile.temporalRelationships = analyzeTemporalRelationships(t.rows, dateCols, numCols);
+          profile.dataQuality = dataQuality;
+          profiles.push(profile);
+        });
+
+        if (profiles.length >= 2) {
+          for (let i = 0; i < profiles.length; i++) {
+            for (let j = i + 1; j < profiles.length; j++) {
+              crossFileCompatibilities.push(
+                analyzeCrossFileCompatibility(
+                  profiles[i],
+                  profiles[j],
+                  tablesToAnalyze[i].rows,
+                  tablesToAnalyze[j].rows,
+                  i,
+                  j
+                )
+              );
+            }
+          }
+        }
+
+        const deterministicRecs = generateDeterministicRecommendations(profiles, crossFileCompatibilities);
+
+        setAiAnalysis({
+          source: "deterministic_fallback",
+          recommendations: deterministicRecs,
+          datasetProfiles: profiles,
+          crossFileCompatibility: crossFileCompatibilities,
+        });
+      } catch (clientErr) {
+        console.error("Client-side fallback also failed:", clientErr);
+      }
     } finally {
       setIsAILoading(false);
     }

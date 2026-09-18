@@ -35,11 +35,21 @@ export function computePearsonCorrelation(
     yDenom += yDiff * yDiff;
   }
 
-  if (xDenom <= 0 || yDenom <= 0) {
-    return { r: 0, n };
+  // If variance is zero in either variable, correlation is mathematically undefined
+  if (xDenom <= 1e-12 || yDenom <= 1e-12) {
+    return null;
   }
 
-  const r = numerator / (Math.sqrt(xDenom) * Math.sqrt(yDenom));
+  const denom = Math.sqrt(xDenom) * Math.sqrt(yDenom);
+  if (denom <= 1e-12 || !Number.isFinite(denom)) {
+    return null;
+  }
+
+  const r = numerator / denom;
+  if (!Number.isFinite(r) || Number.isNaN(r)) {
+    return null;
+  }
+
   const clamped = Math.max(-1, Math.min(1, r));
   return { r: Math.round(clamped * 1000) / 1000, n };
 }
@@ -121,6 +131,22 @@ export function classifyCorrelation(r: number): {
   };
 }
 
+function parseNumeric(v: unknown): number | null {
+  if (v === null || v === undefined || typeof v === "boolean") return null;
+  if (typeof v === "number") return (isNaN(v) || !isFinite(v)) ? null : v;
+  if (typeof v === "string") {
+    const cleaned = v.trim().replace(/[$€£¥%]/g, "").replace(/,/g, "");
+    if (cleaned === "" || cleaned === "-" || cleaned === ".") return null;
+    const n = Number(cleaned);
+    return (isNaN(n) || !isFinite(n)) ? null : n;
+  }
+  return null;
+}
+
+const PLACEHOLDER_TOKENS = new Set([
+  "", "n/a", "na", "null", "none", "unknown", "0", "-", ".", "undefined", "other"
+]);
+
 /**
  * Analyzes all pairwise correlations within a single dataset.
  */
@@ -140,18 +166,11 @@ export function analyzeCorrelations(
       const pairedY: number[] = [];
 
       for (const row of rows) {
-        const v1 = row[col1];
-        const v2 = row[col2];
-        if (
-          !isNilOrEmpty(v1) &&
-          !isNilOrEmpty(v2) &&
-          typeof Number(v1) === "number" &&
-          !isNaN(Number(v1)) &&
-          typeof Number(v2) === "number" &&
-          !isNaN(Number(v2))
-        ) {
-          pairedX.push(Number(v1));
-          pairedY.push(Number(v2));
+        const n1 = parseNumeric(row[col1]);
+        const n2 = parseNumeric(row[col2]);
+        if (n1 !== null && n2 !== null) {
+          pairedX.push(n1);
+          pairedY.push(n2);
         }
       }
 
@@ -331,15 +350,29 @@ export function analyzeCrossFileCompatibility(
       (c1.inferredType === "category" || c1.inferredType === "id") &&
       (c2.inferredType === "category" || c2.inferredType === "id")
     ) {
-      const vals1 = new Set(rows1.map((r) => String(r[c1.name] || "").trim()).filter(Boolean));
-      const vals2 = new Set(rows2.map((r) => String(r[c2.name] || "").trim()).filter(Boolean));
+      const vals1 = new Set(
+        rows1
+          .map((r) => String(r[c1.name] || "").trim().toLowerCase())
+          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
+      );
+      const vals2 = new Set(
+        rows2
+          .map((r) => String(r[c2.name] || "").trim().toLowerCase())
+          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
+      );
 
       let sharedCount = 0;
       vals1.forEach((v) => {
         if (vals2.has(v)) sharedCount++;
       });
 
-      if (sharedCount > 0) {
+      const minCardinality = Math.min(vals1.size, vals2.size);
+      // Require genuine multi-key alignment, not just 1 accidental token
+      const hasMeaningfulOverlap =
+        sharedCount >= 2 &&
+        (minCardinality <= 4 || sharedCount / minCardinality >= 0.2);
+
+      if (hasMeaningfulOverlap) {
         commonKeyCandidates.push(c1.name);
       }
     }
@@ -350,14 +383,22 @@ export function analyzeCrossFileCompatibility(
     const dates1 = cols1.filter((c) => c.inferredType === "date");
     const dates2 = cols2.filter((c) => c.inferredType === "date");
     if (dates1.length > 0 && dates2.length > 0) {
-      // Check if they share at least one value
-      const sample1 = new Set(rows1.map((r) => String(r[dates1[0].name] || "").trim()));
-      const sample2 = new Set(rows2.map((r) => String(r[dates2[0].name] || "").trim()));
+      // Check if they share at least two values
+      const sample1 = new Set(
+        rows1
+          .map((r) => String(r[dates1[0].name] || "").trim().toLowerCase())
+          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
+      );
+      const sample2 = new Set(
+        rows2
+          .map((r) => String(r[dates2[0].name] || "").trim().toLowerCase())
+          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
+      );
       let sharedDates = 0;
       sample1.forEach((d) => {
         if (sample2.has(d)) sharedDates++;
       });
-      if (sharedDates > 0) {
+      if (sharedDates >= 2) {
         compatibleDateColumns.push(`${dates1[0].name} ~ ${dates2[0].name}`);
         commonKeyCandidates.push(`${dates1[0].name} ~ ${dates2[0].name}`);
       }
