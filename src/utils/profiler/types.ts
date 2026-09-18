@@ -14,6 +14,7 @@ export interface NumericStatistics {
   min: number;
   max: number;
   mean: number;
+  sum: number;
   median: number;
   standardDeviation: number;
   q1: number;
@@ -116,6 +117,14 @@ export interface DatasetProfile {
   dataQuality: DataQualityReport;
 }
 
+export interface JoinKeyMapping {
+  primaryKey: string;
+  secondaryKey: string;
+  matchType?: "date" | "id" | "category";
+  sharedValuesCount?: number;
+  overlapRatio?: number;
+}
+
 export interface CrossFileCompatibility {
   compatible: boolean;
   file1Index: number;
@@ -125,6 +134,9 @@ export interface CrossFileCompatibility {
   commonColumns: string[];
   commonKeyCandidates: string[];
   compatibleDateColumns: string[];
+  primaryKey?: string;
+  secondaryKey?: string;
+  joinKeyMappings?: JoinKeyMapping[];
   reason: string;
 }
 
@@ -158,6 +170,8 @@ export interface VisualizationRecommendation {
   categoryAxis?: string | null;
   secondaryFileIndex?: number | null;
   secondaryYAxis?: string | null;
+  matchKeyPrimary?: string | null;
+  matchKeySecondary?: string | null;
   aggregation?: AggregationType;
   chartTheme?: ChartTheme;
   reason: string;

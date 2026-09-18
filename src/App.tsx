@@ -238,6 +238,8 @@ export default function App() {
       isCrossFile: isCross,
       secondaryTableId: secondaryT?.id,
       secondaryYAxisCol: rec.secondaryYAxis || undefined,
+      matchKeyPrimary: isCross ? (rec.matchKeyPrimary || rec.xAxis) : undefined,
+      matchKeySecondary: isCross ? (rec.matchKeySecondary || undefined) : undefined,
       aggregation: rec.aggregation || "none",
       theme: rec.chartTheme || "amber-craft",
       showGrid: true,

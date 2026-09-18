@@ -203,7 +203,7 @@ describe("Deterministic Fallback & Recommendation Validation", () => {
     assert.ok(scatterRec.reason.includes("Pearson correlation"));
   });
 
-  test("strictly validates and repairs recommendations", () => {
+  test("strictly discards hallucinated recommendations and falls back gracefully", () => {
     const rows = [
       { Region: "North", Sales: 100 },
       { Region: "South", Sales: 200 },
@@ -222,33 +222,47 @@ describe("Deterministic Fallback & Recommendation Validation", () => {
     };
 
     const validated = validateAndRepairRecommendation(fakeRec, [profile], []);
-    assert.ok(validated !== null);
-    // xAxis should be repaired to Region
-    assert.equal(validated.xAxis, "Region");
-    // Scatter with categorical x should be repaired to bar
-    assert.equal(validated.plotType, "bar");
-    // "causes" should be sanitized
-    assert.ok(!validated.description.includes("causes"));
+    // Hallucinated column recommendations MUST be discarded, not hallucinated into another column
+    assert.equal(validated, null);
+
+    // When validated via validateRecommendations, fallback recommendations are used
+    const recs = validateRecommendations([fakeRec], [profile], []);
+    assert.ok(recs.length >= 1);
+    assert.ok(recs.every((r) => r.xAxis === "Region" && r.yAxis === "Sales"));
   });
 
-  test("repairs pie charts with negative metrics or high cardinality to bar charts", () => {
-    const rows = [
+  test("rejects pie charts with negative metrics, all-zero totals, or invalid cardinality", () => {
+    const rowsWithNegatives = [
       { Category: "A", Profit: -50 },
       { Category: "B", Profit: 100 },
       { Category: "C", Profit: 200 },
     ];
-    const { profile } = profileDataset("t1", "p.csv", rows);
-    const rec = {
+    const { profile: p1 } = profileDataset("t1", "p1.csv", rowsWithNegatives);
+    const rec1 = {
       title: "Profit Share",
       plotType: "pie",
       fileIndex: 0,
       xAxis: "Category",
       yAxis: "Profit",
     };
+    // Should be rejected due to negative profit
+    assert.equal(validateAndRepairRecommendation(rec1, [p1], []), null);
 
-    const validated = validateAndRepairRecommendation(rec, [profile], []);
-    assert.ok(validated !== null);
-    assert.equal(validated.plotType, "bar");
+    const rowsWithZeroTotal = [
+      { Category: "A", Amount: 0 },
+      { Category: "B", Amount: 0 },
+      { Category: "C", Amount: 0 },
+    ];
+    const { profile: p2 } = profileDataset("t2", "p2.csv", rowsWithZeroTotal);
+    const rec2 = {
+      title: "Zero Share",
+      plotType: "pie",
+      fileIndex: 0,
+      xAxis: "Category",
+      yAxis: "Amount",
+    };
+    // Should be rejected due to zero total
+    assert.equal(validateAndRepairRecommendation(rec2, [p2], []), null);
   });
 });
 
@@ -347,5 +361,230 @@ describe("Statistical Edge Cases & Data Pipeline Integrity", () => {
     assert.ok(q3);
     assert.equal(q3["[sales.csv] Revenue"], 200);
     assert.equal(q3["[costs.csv] Expenses"], 120);
+  });
+
+  test("preserves missing numeric values as null and does not coerce to zero", () => {
+    const table: ParsedTable = {
+      id: "tbl_nulls",
+      fileName: "nulls.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 4,
+      columns: [
+        { name: "Item", type: "category", sampleValues: ["A"], uniqueCount: 4, nonEmptyCount: 4 },
+        { name: "Score", type: "numeric", sampleValues: [10], uniqueCount: 3, nonEmptyCount: 3 },
+      ],
+      rows: [
+        { Item: "A", Score: 10 },
+        { Item: "B", Score: null },
+        { Item: "C", Score: 0 }, // Legitimate zero
+        { Item: "D", Score: "N/A" }, // Missing token
+      ],
+    };
+
+    const config: PlotConfig = {
+      id: "p_nulls",
+      title: "Score by Item",
+      plotType: "bar",
+      primaryTableId: "tbl_nulls",
+      xAxisCol: "Item",
+      yAxisCols: ["Score"],
+      aggregation: "none",
+      theme: "amber-craft",
+      showGrid: true,
+      showLegend: true,
+      showDataPoints: true,
+      curveType: "monotone",
+      createdAt: Date.now(),
+    };
+
+    const { chartData } = prepareChartData(config, { tbl_nulls: table });
+
+    const itemA = chartData.find((r) => r.Item === "A");
+    const itemB = chartData.find((r) => r.Item === "B");
+    const itemC = chartData.find((r) => r.Item === "C");
+    const itemD = chartData.find((r) => r.Item === "D");
+
+    assert.equal(itemA?.Score, 10);
+    // Crucial: B and D must NOT be 0!
+    assert.equal(itemB?.Score, null);
+    assert.equal(itemC?.Score, 0); // Legitimate zero preserved
+    assert.equal(itemD?.Score, null);
+  });
+
+  test("correctly computes aggregations ignoring nulls rather than treating them as zero", () => {
+    const table: ParsedTable = {
+      id: "tbl_agg",
+      fileName: "agg.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 4,
+      columns: [
+        { name: "Dept", type: "category", sampleValues: ["Engineering"], uniqueCount: 1, nonEmptyCount: 4 },
+        { name: "Bonus", type: "numeric", sampleValues: [100], uniqueCount: 3, nonEmptyCount: 3 },
+      ],
+      rows: [
+        { Dept: "Engineering", Bonus: 100 },
+        { Dept: "Engineering", Bonus: null }, // Null
+        { Dept: "Engineering", Bonus: 200 },
+        { Dept: "Engineering", Bonus: "invalid" }, // Null
+      ],
+    };
+
+    // Test mean aggregation: (100 + 200) / 2 = 150 (NOT 300 / 4 = 75)
+    const configMean: PlotConfig = {
+      id: "p_mean",
+      title: "Average Bonus",
+      plotType: "bar",
+      primaryTableId: "tbl_agg",
+      xAxisCol: "Dept",
+      yAxisCols: ["Bonus"],
+      aggregation: "mean",
+      theme: "amber-craft",
+      showGrid: true,
+      showLegend: true,
+      showDataPoints: true,
+      curveType: "monotone",
+      createdAt: Date.now(),
+    };
+
+    const resMean = prepareChartData(configMean, { tbl_agg: table });
+    assert.equal(resMean.chartData.length, 1);
+    assert.equal(resMean.chartData[0].Bonus, 150);
+
+    // Test count aggregation: should count valid numbers only = 2
+    const configCount: PlotConfig = {
+      ...configMean,
+      id: "p_count",
+      aggregation: "count",
+    };
+    const resCount = prepareChartData(configCount, { tbl_agg: table });
+    assert.equal(resCount.chartData[0].Bonus, 2);
+
+    // Test min & max
+    const configMin: PlotConfig = { ...configMean, id: "p_min", aggregation: "min" };
+    assert.equal(prepareChartData(configMin, { tbl_agg: table }).chartData[0].Bonus, 100);
+
+    const configMax: PlotConfig = { ...configMean, id: "p_max", aggregation: "max" };
+    assert.equal(prepareChartData(configMax, { tbl_agg: table }).chartData[0].Bonus, 200);
+  });
+
+  test("handles duplicate secondary join keys deterministically without row explosion", () => {
+    const tablePrimary: ParsedTable = {
+      id: "t_prim",
+      fileName: "primary.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 2,
+      columns: [
+        { name: "Region", type: "category", sampleValues: ["North"], uniqueCount: 2, nonEmptyCount: 2 },
+        { name: "Sales", type: "numeric", sampleValues: [500], uniqueCount: 2, nonEmptyCount: 2 },
+      ],
+      rows: [
+        { Region: "North", Sales: 500 },
+        { Region: "South", Sales: 300 },
+      ],
+    };
+
+    const tableSecondary: ParsedTable = {
+      id: "t_sec",
+      fileName: "secondary.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 4,
+      columns: [
+        { name: "Region", type: "category", sampleValues: ["North"], uniqueCount: 2, nonEmptyCount: 4 },
+        { name: "Tax", type: "numeric", sampleValues: [50], uniqueCount: 4, nonEmptyCount: 4 },
+      ],
+      rows: [
+        // Duplicate keys for North: 50 and 70 (mean = 60)
+        { Region: "North", Tax: 50 },
+        { Region: "North", Tax: 70 },
+        // Single key for South: 30
+        { Region: "South", Tax: 30 },
+      ],
+    };
+
+    const config: PlotConfig = {
+      id: "p_dup",
+      title: "Sales and Tax",
+      plotType: "composed",
+      primaryTableId: "t_prim",
+      xAxisCol: "Region",
+      yAxisCols: ["Sales"],
+      isCrossFile: true,
+      secondaryTableId: "t_sec",
+      secondaryYAxisCol: "Tax",
+      matchKeyPrimary: "Region",
+      matchKeySecondary: "Region",
+      aggregation: "none",
+      theme: "amber-craft",
+      showGrid: true,
+      showLegend: true,
+      showDataPoints: true,
+      curveType: "monotone",
+      createdAt: Date.now(),
+    };
+
+    const { chartData } = prepareChartData(config, {
+      t_prim: tablePrimary,
+      t_sec: tableSecondary,
+    });
+
+    // Row count must remain 2 (exact primary rows), NOT 3 or 4 from duplicate multiplication
+    assert.equal(chartData.length, 2);
+    const north = chartData.find((r) => r.Region === "North");
+    assert.ok(north);
+    assert.equal(north["[primary.csv] Sales"], 500);
+    // Deterministic mean of 50 and 70 is 60
+    assert.equal(north["[secondary.csv] Tax"], 60);
+  });
+
+  test("generates valid histograms with identical values and handles nulls gracefully", () => {
+    const tableIdentical: ParsedTable = {
+      id: "t_hist",
+      fileName: "hist.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 5,
+      columns: [
+        { name: "Rating", type: "numeric", sampleValues: [5], uniqueCount: 1, nonEmptyCount: 5 },
+      ],
+      rows: [
+        { Rating: 5 },
+        { Rating: 5 },
+        { Rating: null },
+        { Rating: 5 },
+        { Rating: 5 },
+      ],
+    };
+
+    const config: PlotConfig = {
+      id: "p_hist",
+      title: "Rating Distribution",
+      plotType: "histogram",
+      primaryTableId: "t_hist",
+      xAxisCol: "Rating",
+      yAxisCols: ["Rating"],
+      aggregation: "none",
+      theme: "sage-forest",
+      showGrid: true,
+      showLegend: true,
+      showDataPoints: true,
+      curveType: "monotone",
+      createdAt: Date.now(),
+    };
+
+    const { chartData } = prepareChartData(config, { t_hist: tableIdentical });
+    assert.ok(chartData.length >= 1);
+    // Count should be 4 (ignoring null), no NaN bin ranges
+    const totalCount = chartData.reduce((acc, bin) => acc + (Number(bin.count) || 0), 0);
+    assert.equal(totalCount, 4);
+    assert.ok(!chartData.some((bin) => String(bin.binRange).includes("NaN")));
   });
 });

@@ -100,14 +100,15 @@ export function generateDeterministicRecommendations(
       });
     }
 
-    // 4. Part-to-Whole Pie Chart (Strict: ONLY if low cardinality 3-7 and positive values)
+    // 4. Part-to-Whole Pie Chart (Strict: ONLY if low cardinality 3-7, strictly positive total, no negatives)
     const pieCandidateCat = catCols.find(
       (c) => c.uniqueCount >= 3 && c.uniqueCount <= 7
     );
     if (pieCandidateCat && numCols.length > 0) {
       const pieNum = numCols[0];
       const hasNegatives = (pieNum.numericStats?.negativesCount || 0) > 0;
-      if (!hasNegatives) {
+      const hasPositiveTotal = (pieNum.numericStats?.max || 0) > 0 && ((pieNum.numericStats?.sum ?? 0) > 0 || (pieNum.numericStats?.mean ?? 0) > 0);
+      if (!hasNegatives && hasPositiveTotal) {
         recommendations.push({
           title: `Share of ${pieNum.name} by ${pieCandidateCat.name}`,
           description: `Displays percentage breakdown of total ${pieNum.name} across ${pieCandidateCat.name}.`,
@@ -117,7 +118,7 @@ export function generateDeterministicRecommendations(
           yAxis: pieNum.name,
           aggregation: "sum",
           chartTheme: "amber-craft",
-          reason: `Low cardinality (${pieCandidateCat.uniqueCount} segments) and strictly non-negative values satisfy statistical criteria for proportional pie charts.`,
+          reason: `Low cardinality (${pieCandidateCat.uniqueCount} segments) and strictly non-negative values with positive total satisfy statistical criteria for proportional pie charts.`,
           analyticalBasis: `Constituent categories: ${pieCandidateCat.categoricalStats?.topValues.map((v) => v.value).join(", ")}.`,
         });
       }
@@ -146,28 +147,31 @@ export function generateDeterministicRecommendations(
   });
 
   // 6. Cross-File Visualization (Strict: ONLY if compatibility analyzer found verified join keys)
-  const verifiedCompatibility = crossFileCompatibility.find((c) => c.compatible);
+  const verifiedCompatibility = crossFileCompatibility.find((c) => c.compatible && c.primaryKey && c.secondaryKey);
   if (verifiedCompatibility && profiles.length >= 2) {
     const p1 = profiles[verifiedCompatibility.file1Index];
     const p2 = profiles[verifiedCompatibility.file2Index];
-    const joinKey = verifiedCompatibility.commonKeyCandidates[0]?.split(" ~ ")[0];
+    const primaryKey = verifiedCompatibility.primaryKey!;
+    const secondaryKey = verifiedCompatibility.secondaryKey!;
 
     const num1 = p1.columns.find((c) => c.inferredType === "numeric");
     const num2 = p2.columns.find((c) => c.inferredType === "numeric");
 
-    if (joinKey && num1 && num2) {
+    if (primaryKey && secondaryKey && num1 && num2) {
       recommendations.push({
         title: `Cross-Dataset: ${num1.name} & ${num2.name}`,
-        description: `Correlates ${num1.name} from '${p1.fileName}' with ${num2.name} from '${p2.fileName}' aligned on shared '${joinKey}'.`,
+        description: `Correlates ${num1.name} from '${p1.fileName}' with ${num2.name} from '${p2.fileName}' aligned on verified key '${primaryKey}' ↔ '${secondaryKey}'.`,
         plotType: "composed",
         fileIndex: verifiedCompatibility.file1Index,
-        xAxis: joinKey,
+        xAxis: primaryKey,
         yAxis: num1.name,
         secondaryFileIndex: verifiedCompatibility.file2Index,
         secondaryYAxis: num2.name,
+        matchKeyPrimary: primaryKey,
+        matchKeySecondary: secondaryKey,
         aggregation: "none",
         chartTheme: "amber-craft",
-        reason: `Schema validation confirmed compatible dimension '${joinKey}' across both datasets.`,
+        reason: `Schema validation confirmed compatible dimension '${primaryKey}' in '${p1.fileName}' aligning with '${secondaryKey}' in '${p2.fileName}'.`,
         analyticalBasis: `Common keys identified: ${verifiedCompatibility.commonKeyCandidates.join(", ")}.`,
       });
     }

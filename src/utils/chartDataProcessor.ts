@@ -54,17 +54,38 @@ export const THEME_PALETTES: Record<ChartTheme, { colors: string[]; bg: string; 
   },
 };
 
+const PLACEHOLDER_TOKENS = new Set([
+  "",
+  "na",
+  "n/a",
+  "null",
+  "none",
+  "nan",
+  "undefined",
+  "-",
+  "--",
+  ".",
+  "?",
+  "nil",
+]);
+
 /**
  * Robust number cleaner that handles strings with currency symbols ($ € £ ¥),
  * commas (1,000.50), percentages (15.2%), and trim whitespace.
+ * Preserves missing/null/undefined/NaN as null rather than coercing to 0.
  */
-export function cleanNumber(val: any): number {
-  if (typeof val === "number") return isNaN(val) ? 0 : val;
-  if (val === null || val === undefined) return 0;
+export function cleanNumber(val: any): number | null {
+  if (typeof val === "number") {
+    return Number.isFinite(val) ? val : null;
+  }
+  if (val === null || val === undefined) return null;
   if (typeof val === "boolean") return val ? 1 : 0;
-  const str = String(val).trim().replace(/[$€£¥%]/g, "").replace(/,/g, "");
+  const rawStr = String(val).trim();
+  if (PLACEHOLDER_TOKENS.has(rawStr.toLowerCase())) return null;
+  const str = rawStr.replace(/[$€£¥%]/g, "").replace(/,/g, "");
+  if (str === "" || isNaN(Number(str))) return null;
   const num = Number(str);
-  return isNaN(num) ? 0 : num;
+  return Number.isFinite(num) ? num : null;
 }
 
 /**
@@ -92,7 +113,7 @@ export function prepareChartData(
     const targetCol = yCols[0] || xCol;
     const values = rows
       .map((r) => cleanNumber(r[targetCol]))
-      .filter((v) => Number.isFinite(v) && !isNaN(v));
+      .filter((v): v is number => v !== null && Number.isFinite(v));
 
     if (values.length === 0) {
       return { chartData: [], seriesKeys: ["Frequency"], xAxisKey: "bin", palette };
@@ -107,7 +128,16 @@ export function prepareChartData(
 
     if (min === max) {
       return {
-        chartData: [{ bin: `${min}`, Frequency: values.length, minVal: min, maxVal: max }],
+        chartData: [
+          {
+            bin: `${min}`,
+            binRange: `${min}`,
+            Frequency: values.length,
+            count: values.length,
+            minVal: min,
+            maxVal: max,
+          },
+        ],
         seriesKeys: ["Frequency"],
         xAxisKey: "bin",
         palette,
@@ -117,18 +147,34 @@ export function prepareChartData(
     const binCount = Math.min(10, Math.max(5, Math.round(Math.sqrt(values.length))));
     const binWidth = (max - min) / (binCount || 1);
 
-    const bins: { bin: string; Frequency: number; minVal: number; maxVal: number }[] = [];
+    const bins: {
+      bin: string;
+      binRange: string;
+      Frequency: number;
+      count: number;
+      minVal: number;
+      maxVal: number;
+    }[] = [];
+
     for (let i = 0; i < binCount; i++) {
       const bMin = min + i * binWidth;
       const bMax = min + (i + 1) * binWidth;
       const label = `${bMin.toFixed(1)} - ${bMax.toFixed(1)}`;
-      bins.push({ bin: label, Frequency: 0, minVal: bMin, maxVal: bMax });
+      bins.push({
+        bin: label,
+        binRange: label,
+        Frequency: 0,
+        count: 0,
+        minVal: bMin,
+        maxVal: bMax,
+      });
     }
 
     values.forEach((v) => {
       const binIdx = Math.min(binCount - 1, Math.floor((v - min) / (binWidth || 1)));
       if (bins[binIdx]) {
         bins[binIdx].Frequency++;
+        bins[binIdx].count++;
       }
     });
 
@@ -140,14 +186,18 @@ export function prepareChartData(
     };
   }
 
-  // 2. PIE / DONUT SPECIAL HANDLING (Group slices by xCol and sum or count yCol)
+  // 2. PIE / DONUT SPECIAL HANDLING (Group slices by xCol and sum yCol, ignoring nulls and negatives)
   if (config.plotType === "pie") {
     const targetMetric = yCols[0];
     const sliceMap = new Map<string, number>();
 
     rows.forEach((r) => {
       const label = String(r[xCol] !== undefined && r[xCol] !== null ? r[xCol] : "Other");
-      const val = targetMetric ? Math.max(0, cleanNumber(r[targetMetric])) : 1;
+      let val = 1;
+      if (targetMetric) {
+        const cleaned = cleanNumber(r[targetMetric]);
+        val = cleaned !== null ? Math.max(0, cleaned) : 0;
+      }
       sliceMap.set(label, (sliceMap.get(label) || 0) + val);
     });
 
@@ -171,38 +221,47 @@ export function prepareChartData(
     };
   }
 
-  // 3. CROSS-FILE PLOTTING (Key-based alignment)
+  // 3. CROSS-FILE PLOTTING (Key-based alignment with deterministic duplicate key handling)
   if (config.isCrossFile && config.secondaryTableId) {
     const secondaryTable = tablesMap[config.secondaryTableId];
     if (secondaryTable) {
       const pRows = primaryTable.rows;
       const sRows = secondaryTable.rows;
 
-      // Identify join key in secondary table
-      const primaryKey = xCol;
-      const secColMatch = secondaryTable.columns.find(
-        (c) => c.name.toLowerCase().trim() === primaryKey.toLowerCase().trim()
-      );
-      const secKey = secColMatch ? secColMatch.name : (secondaryTable.columns[0]?.name || primaryKey);
+      // Identify join key in primary and secondary tables
+      const primaryKey = config.matchKeyPrimary || config.xAxisCol || primaryTable.columns[0]?.name || "id";
+      let secKey = config.matchKeySecondary;
+      if (!secKey) {
+        const secColMatch = secondaryTable.columns.find(
+          (c) => c.name.toLowerCase().trim() === primaryKey.toLowerCase().trim()
+        );
+        secKey = secColMatch ? secColMatch.name : (secondaryTable.columns[0]?.name || primaryKey);
+      }
 
-      // Index secondary table by key
-      const sMap = new Map<string, Record<string, any>>();
+      // Group secondary table by key to handle duplicates deterministically (mean aggregation)
+      const y2Col = config.secondaryYAxisCol;
+      const sValuesMap = new Map<string, number[]>();
+
       sRows.forEach((sr) => {
-        const keyVal = String(sr[secKey] !== undefined ? sr[secKey] : "").trim().toLowerCase();
-        if (keyVal && !sMap.has(keyVal)) {
-          sMap.set(keyVal, sr);
+        const rawKey = sr[secKey!] !== undefined && sr[secKey!] !== null ? sr[secKey!] : "";
+        const keyVal = String(rawKey).trim().toLowerCase();
+        if (keyVal.length > 0 && y2Col && sr[y2Col] !== undefined) {
+          const num = cleanNumber(sr[y2Col]);
+          if (num !== null) {
+            if (!sValuesMap.has(keyVal)) {
+              sValuesMap.set(keyVal, []);
+            }
+            sValuesMap.get(keyVal)!.push(num);
+          }
         }
       });
 
       const y1Cols = yCols;
-      const y2Col = config.secondaryYAxisCol;
-
       const merged: Record<string, any>[] = [];
-      pRows.forEach((pR, idx) => {
-        const rawX = pR[primaryKey] !== undefined ? pR[primaryKey] : `Row ${idx + 1}`;
-        const lookupKey = String(rawX).trim().toLowerCase();
-        const sR = sMap.get(lookupKey);
 
+      pRows.forEach((pR, idx) => {
+        const rawX = pR[primaryKey] !== undefined && pR[primaryKey] !== null ? pR[primaryKey] : `Row ${idx + 1}`;
+        const lookupKey = String(rawX).trim().toLowerCase();
         const rowObj: Record<string, any> = { [primaryKey]: rawX };
 
         y1Cols.forEach((yCol) => {
@@ -210,7 +269,14 @@ export function prepareChartData(
         });
 
         if (y2Col) {
-          rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = sR ? cleanNumber(sR[y2Col]) : 0;
+          const vals = sValuesMap.get(lookupKey);
+          if (vals && vals.length > 0) {
+            // Deterministic average for duplicate matching keys
+            const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+            rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = Math.round(avg * 100) / 100;
+          } else {
+            rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = null;
+          }
         }
 
         merged.push(rowObj);
@@ -232,32 +298,46 @@ export function prepareChartData(
 
   // 4. STANDARD SINGLE-TABLE PLOTTING (With Aggregation if requested)
   if (config.aggregation && config.aggregation !== "none") {
-    const groupMap = new Map<string, { count: number; sums: Record<string, number>; mins: Record<string, number>; maxs: Record<string, number> }>();
+    interface AggBin {
+      totalRows: number;
+      sums: Record<string, number>;
+      mins: Record<string, number>;
+      maxs: Record<string, number>;
+      validCounts: Record<string, number>;
+    }
+
+    const groupMap = new Map<string, AggBin>();
 
     rows.forEach((r) => {
       const xKey = String(r[xCol] !== undefined && r[xCol] !== null ? r[xCol] : "N/A");
       if (!groupMap.has(xKey)) {
         groupMap.set(xKey, {
-          count: 0,
+          totalRows: 0,
           sums: {},
           mins: {},
           maxs: {},
+          validCounts: {},
         });
         yCols.forEach((y) => {
-          groupMap.get(xKey)!.sums[y] = 0;
-          groupMap.get(xKey)!.mins[y] = Infinity;
-          groupMap.get(xKey)!.maxs[y] = -Infinity;
+          const bin = groupMap.get(xKey)!;
+          bin.sums[y] = 0;
+          bin.mins[y] = Infinity;
+          bin.maxs[y] = -Infinity;
+          bin.validCounts[y] = 0;
         });
       }
 
       const entry = groupMap.get(xKey)!;
-      entry.count++;
+      entry.totalRows++;
 
       yCols.forEach((y) => {
         const val = cleanNumber(r[y]);
-        entry.sums[y] += val;
-        if (val < entry.mins[y]) entry.mins[y] = val;
-        if (val > entry.maxs[y]) entry.maxs[y] = val;
+        if (val !== null) {
+          entry.sums[y] += val;
+          entry.validCounts[y]++;
+          if (val < entry.mins[y]) entry.mins[y] = val;
+          if (val > entry.maxs[y]) entry.maxs[y] = val;
+        }
       });
     });
 
@@ -266,17 +346,23 @@ export function prepareChartData(
       const rowObj: Record<string, any> = { [xCol]: xKey };
 
       if (config.aggregation === "count") {
-        rowObj["Count"] = entry.count;
+        yCols.forEach((y) => {
+          rowObj[y] = entry.validCounts[y];
+        });
+        rowObj["Count"] = entry.validCounts[yCols[0]] ?? entry.totalRows;
       } else {
         yCols.forEach((y) => {
-          if (config.aggregation === "sum") {
+          const vCount = entry.validCounts[y];
+          if (vCount === 0) {
+            rowObj[y] = null;
+          } else if (config.aggregation === "sum") {
             rowObj[y] = Math.round(entry.sums[y] * 100) / 100;
           } else if (config.aggregation === "mean") {
-            rowObj[y] = Math.round((entry.sums[y] / (entry.count || 1)) * 100) / 100;
+            rowObj[y] = Math.round((entry.sums[y] / vCount) * 100) / 100;
           } else if (config.aggregation === "min") {
-            rowObj[y] = entry.mins[y] === Infinity ? 0 : entry.mins[y];
+            rowObj[y] = entry.mins[y];
           } else if (config.aggregation === "max") {
-            rowObj[y] = entry.maxs[y] === -Infinity ? 0 : entry.maxs[y];
+            rowObj[y] = entry.maxs[y];
           }
         });
       }
@@ -285,7 +371,7 @@ export function prepareChartData(
 
     return {
       chartData: aggregated,
-      seriesKeys: config.aggregation === "count" ? ["Count"] : yCols,
+      seriesKeys: yCols,
       xAxisKey: xCol,
       palette,
     };

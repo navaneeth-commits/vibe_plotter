@@ -4,6 +4,7 @@ import {
   CrossFileCompatibility,
   DatasetProfile,
   GroupRelationship,
+  JoinKeyMapping,
   TemporalRelationship,
 } from "./types";
 import { parseDateToTime, isNilOrEmpty } from "./statisticalProfiler";
@@ -316,9 +317,6 @@ export function analyzeCrossFileCompatibility(
   const cols1 = p1.columns;
   const cols2 = p2.columns;
 
-  const names1 = cols1.map((c) => c.name.toLowerCase().trim());
-  const names2 = cols2.map((c) => c.name.toLowerCase().trim());
-
   // Find overlapping column names
   const commonColumns: string[] = [];
   cols1.forEach((c1) => {
@@ -330,82 +328,133 @@ export function analyzeCrossFileCompatibility(
     }
   });
 
-  // Check for common key candidates (ID, Date, or Shared Category)
-  const commonKeyCandidates: string[] = [];
-  const compatibleDateColumns: string[] = [];
+  const joinKeyMappings: JoinKeyMapping[] = [];
 
-  for (const colName of commonColumns) {
-    const c1 = cols1.find((c) => c.name.toLowerCase().trim() === colName.toLowerCase().trim())!;
-    const c2 = cols2.find((c) => c.name.toLowerCase().trim() === colName.toLowerCase().trim())!;
+  // Helper to test if values look like generic boolean / binary flags rather than real entity keys
+  const isBinaryFlag = (vals: Set<string>): boolean => {
+    if (vals.size !== 2) return false;
+    const arr = Array.from(vals);
+    const flags = new Set(["true", "false", "yes", "no", "0", "1", "y", "n"]);
+    return arr.every((v) => flags.has(v));
+  };
 
-    // Check date compatibility
-    if (c1.inferredType === "date" && c2.inferredType === "date") {
-      compatibleDateColumns.push(c1.name);
-      commonKeyCandidates.push(c1.name);
-      continue;
+  // Helper to extract clean non-placeholder value set
+  const extractCleanSet = (rows: Record<string, any>[], colName: string): Set<string> => {
+    return new Set(
+      rows
+        .map((r) => String(r[colName] !== undefined && r[colName] !== null ? r[colName] : "").trim().toLowerCase())
+        .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
+    );
+  };
+
+  // 1. Evaluate Date / Temporal Columns (same name or different name)
+  const dates1 = cols1.filter((c) => c.inferredType === "date");
+  const dates2 = cols2.filter((c) => c.inferredType === "date");
+
+  for (const d1 of dates1) {
+    for (const d2 of dates2) {
+      const set1 = extractCleanSet(rows1, d1.name);
+      const set2 = extractCleanSet(rows2, d2.name);
+      if (set1.size === 0 || set2.size === 0) continue;
+
+      let sharedDates = 0;
+      set1.forEach((val) => {
+        if (set2.has(val)) sharedDates++;
+      });
+
+      const minCardinality = Math.min(set1.size, set2.size);
+      const overlapRatio = minCardinality > 0 ? sharedDates / minCardinality : 0;
+
+      // Meaningful temporal alignment: at least 2 overlapping periods and meaningful overlap ratio
+      const isMeaningful =
+        sharedDates >= 2 &&
+        (minCardinality <= 3 ? overlapRatio >= 0.5 : overlapRatio >= 0.35);
+
+      if (isMeaningful) {
+        joinKeyMappings.push({
+          primaryKey: d1.name,
+          secondaryKey: d2.name,
+          matchType: "date",
+          sharedValuesCount: sharedDates,
+          overlapRatio,
+        });
+      }
     }
+  }
 
-    // Check shared categorical or identifier column with overlapping values
-    if (
-      (c1.inferredType === "category" || c1.inferredType === "id") &&
-      (c2.inferredType === "category" || c2.inferredType === "id")
-    ) {
-      const vals1 = new Set(
-        rows1
-          .map((r) => String(r[c1.name] || "").trim().toLowerCase())
-          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
-      );
-      const vals2 = new Set(
-        rows2
-          .map((r) => String(r[c2.name] || "").trim().toLowerCase())
-          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
-      );
+  // 2. Evaluate ID and Categorical Key Columns (same name or different name)
+  const keys1 = cols1.filter((c) => c.inferredType === "id" || c.inferredType === "category");
+  const keys2 = cols2.filter((c) => c.inferredType === "id" || c.inferredType === "category");
+
+  for (const k1 of keys1) {
+    for (const k2 of keys2) {
+      // Avoid re-evaluating date pairs already matched
+      if (joinKeyMappings.some((m) => m.primaryKey === k1.name && m.secondaryKey === k2.name)) {
+        continue;
+      }
+
+      const isSameName = k1.name.toLowerCase().trim() === k2.name.toLowerCase().trim();
+
+      const set1 = extractCleanSet(rows1, k1.name);
+      const set2 = extractCleanSet(rows2, k2.name);
+
+      // Key candidates must have cardinality >= 2 and cannot be binary boolean flags
+      if (set1.size < 2 || set2.size < 2 || isBinaryFlag(set1) || isBinaryFlag(set2)) {
+        continue;
+      }
 
       let sharedCount = 0;
-      vals1.forEach((v) => {
-        if (vals2.has(v)) sharedCount++;
+      set1.forEach((val) => {
+        if (set2.has(val)) sharedCount++;
       });
 
-      const minCardinality = Math.min(vals1.size, vals2.size);
-      // Require genuine multi-key alignment, not just 1 accidental token
-      const hasMeaningfulOverlap =
-        sharedCount >= 2 &&
-        (minCardinality <= 4 || sharedCount / minCardinality >= 0.2);
+      const minCardinality = Math.min(set1.size, set2.size);
+      const overlapRatio = minCardinality > 0 ? sharedCount / minCardinality : 0;
 
-      if (hasMeaningfulOverlap) {
-        commonKeyCandidates.push(c1.name);
+      let isMeaningful = false;
+      if (isSameName) {
+        // Same column name: require at least 2 shared keys and >= 35% overlap (or >= 50% for small sets)
+        isMeaningful =
+          sharedCount >= 2 &&
+          (minCardinality <= 4 ? overlapRatio >= 0.5 : overlapRatio >= 0.35);
+      } else {
+        // Different column names: require stronger signal (>= 3 shared keys and >= 50% overlap)
+        isMeaningful = sharedCount >= 3 && overlapRatio >= 0.5;
+      }
+
+      if (isMeaningful) {
+        const matchType = k1.inferredType === "id" || k2.inferredType === "id" ? "id" : "category";
+        joinKeyMappings.push({
+          primaryKey: k1.name,
+          secondaryKey: k2.name,
+          matchType,
+          sharedValuesCount: sharedCount,
+          overlapRatio,
+        });
       }
     }
   }
 
-  // Also check if date columns have different names but both have dates (e.g. "Quarter" and "Quarter" or "Date" and "Period")
-  if (compatibleDateColumns.length === 0) {
-    const dates1 = cols1.filter((c) => c.inferredType === "date");
-    const dates2 = cols2.filter((c) => c.inferredType === "date");
-    if (dates1.length > 0 && dates2.length > 0) {
-      // Check if they share at least two values
-      const sample1 = new Set(
-        rows1
-          .map((r) => String(r[dates1[0].name] || "").trim().toLowerCase())
-          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
-      );
-      const sample2 = new Set(
-        rows2
-          .map((r) => String(r[dates2[0].name] || "").trim().toLowerCase())
-          .filter((s) => s.length > 0 && !PLACEHOLDER_TOKENS.has(s))
-      );
-      let sharedDates = 0;
-      sample1.forEach((d) => {
-        if (sample2.has(d)) sharedDates++;
-      });
-      if (sharedDates >= 2) {
-        compatibleDateColumns.push(`${dates1[0].name} ~ ${dates2[0].name}`);
-        commonKeyCandidates.push(`${dates1[0].name} ~ ${dates2[0].name}`);
-      }
-    }
-  }
+  // Sort mappings: exact name match first, then dates, then higher overlap ratio
+  joinKeyMappings.sort((a, b) => {
+    const aSame = a.primaryKey.toLowerCase().trim() === a.secondaryKey.toLowerCase().trim() ? 1 : 0;
+    const bSame = b.primaryKey.toLowerCase().trim() === b.secondaryKey.toLowerCase().trim() ? 1 : 0;
+    if (aSame !== bSame) return bSame - aSame;
+    if (a.matchType === "date" && b.matchType !== "date") return -1;
+    if (b.matchType === "date" && a.matchType !== "date") return 1;
+    return (b.overlapRatio || 0) - (a.overlapRatio || 0);
+  });
 
-  const isCompatible = commonKeyCandidates.length > 0;
+  const isCompatible = joinKeyMappings.length > 0;
+  const bestMapping = isCompatible ? joinKeyMappings[0] : null;
+
+  const commonKeyCandidates = joinKeyMappings.map((m) =>
+    m.primaryKey === m.secondaryKey ? m.primaryKey : `${m.primaryKey} ↔ ${m.secondaryKey}`
+  );
+
+  const compatibleDateColumns = joinKeyMappings
+    .filter((m) => m.matchType === "date")
+    .map((m) => (m.primaryKey === m.secondaryKey ? m.primaryKey : `${m.primaryKey} ↔ ${m.secondaryKey}`));
 
   return {
     compatible: isCompatible,
@@ -416,8 +465,11 @@ export function analyzeCrossFileCompatibility(
     commonColumns,
     commonKeyCandidates,
     compatibleDateColumns,
+    primaryKey: bestMapping?.primaryKey,
+    secondaryKey: bestMapping?.secondaryKey,
+    joinKeyMappings,
     reason: isCompatible
-      ? `Compatible via common key / dimension: ${commonKeyCandidates.join(", ")}.`
+      ? `Compatible via verified key: '${bestMapping!.primaryKey}' in '${p1.fileName}' ↔ '${bestMapping!.secondaryKey}' in '${p2.fileName}' (${bestMapping!.sharedValuesCount} shared values, ${(bestMapping!.overlapRatio! * 100).toFixed(0)}% overlap).`
       : "No reliable cross-file relationship or common join key was detected between these datasets.",
   };
 }

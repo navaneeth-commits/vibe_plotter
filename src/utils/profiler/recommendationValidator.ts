@@ -21,7 +21,9 @@ const VALID_AGGREGATIONS = new Set(["none", "sum", "mean", "count", "min", "max"
 
 /**
  * Validates a single recommendation against the actual dataset profiles.
- * If valid or repairable, returns the normalized recommendation. Otherwise returns null.
+ * Discards recommendations that hallucinate columns, have invalid semantic axis types,
+ * or violate chart constraints (e.g. pie with negatives or zero totals), allowing
+ * the deterministic fallback engine to supply grounded alternatives.
  */
 export function validateAndRepairRecommendation(
   rec: any,
@@ -35,71 +37,68 @@ export function validateAndRepairRecommendation(
   if (fileIndex < 0 || fileIndex >= profiles.length) return null;
 
   const profile = profiles[fileIndex];
-  const colMap = new Map(profile.columns.map((c) => [c.name.toLowerCase(), c]));
+  const colMap = new Map(profile.columns.map((c) => [c.name.toLowerCase().trim(), c]));
 
-  // 2. Validate xAxis column
-  let xAxis = typeof rec.xAxis === "string" ? rec.xAxis.trim() : "";
-  let xCol = colMap.get(xAxis.toLowerCase());
-  if (!xCol) {
-    // Attempt fallback to first date or category or first column
-    const dateCol = profile.columns.find((c) => c.inferredType === "date");
-    const catCol = profile.columns.find((c) => c.inferredType === "category");
-    const fallback = dateCol || catCol || profile.columns[0];
-    if (!fallback) return null;
-    xAxis = fallback.name;
-    xCol = fallback;
-  }
+  // 2. Validate xAxis column - MUST exist in dataset; do NOT invent replacement columns
+  const rawXAxis = typeof rec.xAxis === "string" ? rec.xAxis.trim() : "";
+  if (!rawXAxis) return null;
+  const xCol = colMap.get(rawXAxis.toLowerCase());
+  if (!xCol) return null;
+  const xAxis = xCol.name;
 
-  // 3. Validate yAxis column
-  let yAxis = typeof rec.yAxis === "string" ? rec.yAxis.trim() : "";
-  let yCol = colMap.get(yAxis.toLowerCase());
-  if (!yCol || yCol.inferredType !== "numeric") {
-    // Pick first numeric column
-    const numCol = profile.columns.find((c) => c.inferredType === "numeric");
-    if (!numCol) return null;
-    yAxis = numCol.name;
-    yCol = numCol;
-  }
+  // 3. Validate yAxis column - MUST exist and be numeric; do NOT invent replacement columns
+  const rawYAxis = typeof rec.yAxis === "string" ? rec.yAxis.trim() : "";
+  if (!rawYAxis) return null;
+  const yCol = colMap.get(rawYAxis.toLowerCase());
+  if (!yCol || yCol.inferredType !== "numeric") return null;
+  const yAxis = yCol.name;
 
-  // 4. Validate and repair plotType
-  let plotType: PlotType = VALID_PLOT_TYPES.has(rec.plotType) ? rec.plotType : "bar";
+  // 4. Validate plotType against allowed types
+  if (!VALID_PLOT_TYPES.has(rec.plotType)) return null;
+  const plotType: PlotType = rec.plotType;
 
-  // Check plotType constraints
+  // Strict semantic constraints per chart type:
   if (plotType === "scatter") {
-    // Scatter requires numeric continuous x-axis
+    // Scatter plot strictly requires numeric continuous x-axis
     if (xCol.inferredType !== "numeric") {
-      plotType = "bar"; // gracefully repair to bar chart
-    }
-  } else if (plotType === "pie") {
-    // Pie requires categorical x-axis with low cardinality (2 to 7) and non-negative metric
-    const hasNegatives = (yCol.numericStats?.negativesCount || 0) > 0;
-    if (xCol.uniqueCount > 7 || xCol.uniqueCount < 2 || xCol.inferredType === "numeric" || xCol.inferredType === "id" || hasNegatives) {
-      plotType = "bar";
+      return null;
     }
   } else if (plotType === "histogram") {
-    if (xCol.inferredType !== "numeric") {
-      xAxis = yAxis;
-      xCol = yCol;
+    // Histogram strictly requires continuous numeric column
+    if (xCol.inferredType !== "numeric" || xCol.uniqueCount < 4) {
+      return null;
     }
-    if (xCol.uniqueCount < 4) {
-      plotType = "bar";
+  } else if (plotType === "pie") {
+    // Pie requires 3–7 categories, non-numeric/non-id axis, no negative values, and positive total
+    if (xCol.uniqueCount < 3 || xCol.uniqueCount > 7) {
+      return null;
     }
-  }
-
-  // Prevent plotting an identifier column directly as categorical bar chart if alternatives exist
-  if ((plotType === "bar" || plotType === "line") && xCol.inferredType === "id" && xCol.uniqueCount > 15) {
-    const betterCat = profile.columns.find((c) => c.inferredType === "category" && c.uniqueCount >= 2 && c.uniqueCount <= 15);
-    const betterDate = profile.columns.find((c) => c.inferredType === "date");
-    const alternative = betterDate || betterCat;
-    if (alternative) {
-      xAxis = alternative.name;
-      xCol = alternative;
+    if (xCol.inferredType === "numeric" || xCol.inferredType === "id") {
+      return null;
+    }
+    const hasNegatives = (yCol.numericStats?.negativesCount || 0) > 0;
+    if (hasNegatives) {
+      return null;
+    }
+    const maxVal = yCol.numericStats?.max || 0;
+    const sumVal = yCol.numericStats?.sum ?? 0;
+    const meanVal = yCol.numericStats?.mean ?? 0;
+    // Disallow all-zero or non-positive total
+    if (maxVal <= 0 || (sumVal <= 0 && meanVal <= 0)) {
+      return null;
+    }
+  } else if (plotType === "bar" || plotType === "line") {
+    // Disallow direct plotting of high-cardinality ID columns
+    if (xCol.inferredType === "id" && xCol.uniqueCount > 20) {
+      return null;
     }
   }
 
   // 5. Cross-file validation
   let secondaryFileIndex: number | null = null;
   let secondaryYAxis: string | null = null;
+  let matchKeyPrimary: string | null = null;
+  let matchKeySecondary: string | null = null;
 
   if (
     typeof rec.secondaryFileIndex === "number" &&
@@ -107,41 +106,46 @@ export function validateAndRepairRecommendation(
     rec.secondaryFileIndex < profiles.length &&
     rec.secondaryFileIndex !== fileIndex
   ) {
-    // Check if cross-file compatibility is confirmed
-    const isCompatible = crossFileCompatibility.some(
+    // Verify cross-file compatibility is explicitly confirmed with valid keys
+    const compat = crossFileCompatibility.find(
       (c) =>
         c.compatible &&
         ((c.file1Index === fileIndex && c.file2Index === rec.secondaryFileIndex) ||
           (c.file2Index === fileIndex && c.file1Index === rec.secondaryFileIndex))
     );
 
-    if (isCompatible) {
+    if (compat && compat.primaryKey && compat.secondaryKey) {
       const secProfile = profiles[rec.secondaryFileIndex];
-      const secColMap = new Map(secProfile.columns.map((c) => [c.name.toLowerCase(), c]));
+      const secColMap = new Map(secProfile.columns.map((c) => [c.name.toLowerCase().trim(), c]));
       const requestedSecY = typeof rec.secondaryYAxis === "string" ? rec.secondaryYAxis.trim() : "";
       const secYCol = secColMap.get(requestedSecY.toLowerCase());
 
       if (secYCol && secYCol.inferredType === "numeric") {
         secondaryFileIndex = rec.secondaryFileIndex;
         secondaryYAxis = secYCol.name;
-      } else {
-        const firstNumSec = secProfile.columns.find((c) => c.inferredType === "numeric");
-        if (firstNumSec) {
-          secondaryFileIndex = rec.secondaryFileIndex;
-          secondaryYAxis = firstNumSec.name;
-        }
+        matchKeyPrimary = compat.file1Index === fileIndex ? compat.primaryKey : compat.secondaryKey;
+        matchKeySecondary = compat.file1Index === fileIndex ? compat.secondaryKey : compat.primaryKey;
       }
     }
   }
 
-  // 6. Aggregation
-  let aggregation: any = rec.aggregation;
-  if (!VALID_AGGREGATIONS.has(aggregation)) {
-    aggregation = plotType === "pie" || plotType === "bar" ? "sum" : "none";
+  // 6. Validate Category Axis (if specified)
+  let categoryAxis: string | undefined = undefined;
+  if (typeof rec.categoryAxis === "string" && rec.categoryAxis.trim().length > 0) {
+    const catCol = colMap.get(rec.categoryAxis.trim().toLowerCase());
+    if (catCol && (catCol.inferredType === "category" || catCol.inferredType === "id")) {
+      categoryAxis = catCol.name;
+    }
   }
 
-  // 7. Sanitize analytical claims in title and description
-  let title = typeof rec.title === "string" && rec.title.trim().length > 0
+  // 7. Aggregation normalization
+  let aggregation: any = rec.aggregation;
+  if (!VALID_AGGREGATIONS.has(aggregation)) {
+    aggregation = plotType === "pie" ? "sum" : "none";
+  }
+
+  // 8. Sanitize analytical claims in title and description
+  const title = typeof rec.title === "string" && rec.title.trim().length > 0
     ? rec.title.trim()
     : `${yAxis} by ${xAxis}`;
 
@@ -170,7 +174,7 @@ export function validateAndRepairRecommendation(
       .replace(/\bcorrelates with\b/gi, "relates to");
   }
 
-  let reason = typeof rec.reason === "string" && rec.reason.trim().length > 0
+  const reason = typeof rec.reason === "string" && rec.reason.trim().length > 0
     ? rec.reason.trim()
     : `Recommended based on ${xCol.inferredType} dimension and ${yCol.inferredType} measure.`;
 
@@ -181,9 +185,11 @@ export function validateAndRepairRecommendation(
     fileIndex,
     xAxis,
     yAxis,
-    categoryAxis: rec.categoryAxis || undefined,
+    categoryAxis,
     secondaryFileIndex,
     secondaryYAxis,
+    matchKeyPrimary,
+    matchKeySecondary,
     aggregation,
     chartTheme: rec.chartTheme || "amber-craft",
     reason,

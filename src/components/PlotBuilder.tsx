@@ -165,6 +165,8 @@ export const PlotBuilder: React.FC<PlotBuilderProps> = ({
       isCrossFile: isCrossFile && Boolean(secondaryTableId && secondaryYCol && tables.length >= 2),
       secondaryTableId: isCrossFile ? secondaryTableId : undefined,
       secondaryYAxisCol: isCrossFile ? secondaryYCol : undefined,
+      matchKeyPrimary: isCrossFile ? (prefillConfig?.matchKeyPrimary || finalX) : undefined,
+      matchKeySecondary: isCrossFile ? (prefillConfig?.matchKeySecondary || undefined) : undefined,
       aggregation,
       theme,
       showGrid,

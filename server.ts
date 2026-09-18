@@ -168,14 +168,52 @@ ${tempStr}`;
   return `### PROFILED DATASETS:\n${tableSummaries}\n\n### CROSS-FILE COMPATIBILITY:\n${crossFileStr}`;
 }
 
-// AI Table Analysis & Visualization Recommendation Endpoint
-app.post("/api/analyze-table", async (req, res) => {
-  try {
-    const { tables } = req.body;
-    if (!tables || !Array.isArray(tables) || tables.length === 0) {
-      return res.status(400).json({ error: "Missing or invalid tables data." });
+// Helper to validate table payload structure
+function validateTablesPayload(tables: unknown): { valid: boolean; error?: string } {
+  if (!Array.isArray(tables) || tables.length === 0) {
+    return { valid: false, error: "'tables' must be a non-empty array." };
+  }
+
+  if (tables.length > 20) {
+    return { valid: false, error: "Maximum of 20 tables allowed per request." };
+  }
+
+  for (let i = 0; i < tables.length; i++) {
+    const t = tables[i];
+    if (!t || typeof t !== "object" || Array.isArray(t)) {
+      return { valid: false, error: `Table at index ${i} is not a valid object.` };
     }
 
+    const rows = (t as any).rows;
+    const sampleRows = (t as any).sampleRows;
+
+    if (rows !== undefined && !Array.isArray(rows)) {
+      return { valid: false, error: `Table at index ${i} has invalid 'rows' property (must be an array).` };
+    }
+
+    if (sampleRows !== undefined && !Array.isArray(sampleRows)) {
+      return { valid: false, error: `Table at index ${i} has invalid 'sampleRows' property (must be an array).` };
+    }
+
+    const activeRows = Array.isArray(rows) ? rows : (Array.isArray(sampleRows) ? sampleRows : []);
+    if (activeRows.length > 0 && typeof activeRows[0] !== "object") {
+      return { valid: false, error: `Table at index ${i} contains non-object rows.` };
+    }
+  }
+
+  return { valid: true };
+}
+
+// AI Table Analysis & Visualization Recommendation Endpoint
+app.post("/api/analyze-table", async (req, res) => {
+  const { tables } = req.body || {};
+
+  const validation = validateTablesPayload(tables);
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
+  }
+
+  try {
     // Step 1: Deterministic Statistical Profiling & Quality Analysis
     const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(tables);
 
@@ -304,10 +342,13 @@ ${compactSummary}`;
       recommendations: validatedRecs,
     });
   } catch (error: any) {
-    console.error("AI analysis or Gemini error:", error);
+    // Sanitize error logging to prevent leaking sensitive row data in production logs
+    const safeErrorMsg = error instanceof Error ? error.message : "Unknown analysis failure";
+    console.error(`AI analysis pipeline error: ${safeErrorMsg}`);
 
     // Step 5: Graceful Fallback to Deterministic Profiler Engine
-    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(req.body.tables || []);
+    const safeTables = Array.isArray(tables) ? tables : [];
+    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(safeTables);
     const recommendations = generateDeterministicRecommendations(profiles, crossFileAnalysis);
 
     const fallbackObservations: string[] = [];
