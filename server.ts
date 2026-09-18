@@ -3,6 +3,19 @@ import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import {
+  profileDataset,
+  analyzeCorrelations,
+  analyzeGroupRelationships,
+  analyzeTemporalRelationships,
+  analyzeCrossFileCompatibility,
+  generateDeterministicRecommendations,
+  validateRecommendations,
+  DatasetProfile,
+  DataQualityReport,
+  CrossFileCompatibility,
+  VisualizationRecommendation,
+} from "./src/utils/profiler";
 
 dotenv.config();
 
@@ -32,10 +45,130 @@ function getGenAI(): GoogleGenAI | null {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    app: "vibe-plotter",
+    timestamp: new Date().toISOString(),
+  });
 });
 
-// AI Table Analysis & Plot Recommendation Endpoint
+/**
+ * Executes full deterministic profiling across all provided tables.
+ */
+function runDeterministicAnalysis(tables: any[]): {
+  profiles: DatasetProfile[];
+  dataQualityMap: Record<string, DataQualityReport>;
+  crossFileAnalysis: CrossFileCompatibility[];
+} {
+  const profiles: DatasetProfile[] = [];
+  const dataQualityMap: Record<string, DataQualityReport> = {};
+
+  tables.forEach((t, idx) => {
+    const tableId = t.id || `table_${idx}`;
+    const fileName = t.fileName || `dataset_${idx + 1}.csv`;
+    const rows: Record<string, any>[] = Array.isArray(t.rows) && t.rows.length > 0
+      ? t.rows
+      : Array.isArray(t.sampleRows)
+      ? t.sampleRows
+      : [];
+
+    const { profile, dataQuality } = profileDataset(tableId, fileName, rows);
+
+    // Compute correlations for numeric columns
+    const numericCols = profile.columns
+      .filter((c) => c.inferredType === "numeric")
+      .map((c) => c.name);
+    const categoryCols = profile.columns
+      .filter((c) => c.inferredType === "category")
+      .map((c) => c.name);
+    const dateCols = profile.columns
+      .filter((c) => c.inferredType === "date")
+      .map((c) => c.name);
+
+    profile.correlations = analyzeCorrelations(rows, numericCols);
+    profile.groupRelationships = analyzeGroupRelationships(rows, categoryCols, numericCols);
+    profile.temporalRelationships = analyzeTemporalRelationships(rows, dateCols, numericCols);
+
+    profiles.push(profile);
+    dataQualityMap[fileName] = dataQuality;
+  });
+
+  // Cross-file compatibility analysis for all pairs
+  const crossFileAnalysis: CrossFileCompatibility[] = [];
+  if (profiles.length >= 2) {
+    for (let i = 0; i < profiles.length; i++) {
+      for (let j = i + 1; j < profiles.length; j++) {
+        const rows1 = tables[i]?.rows || tables[i]?.sampleRows || [];
+        const rows2 = tables[j]?.rows || tables[j]?.sampleRows || [];
+        const compat = analyzeCrossFileCompatibility(
+          profiles[i],
+          profiles[j],
+          rows1,
+          rows2,
+          i,
+          j
+        );
+        crossFileAnalysis.push(compat);
+      }
+    }
+  }
+
+  return { profiles, dataQualityMap, crossFileAnalysis };
+}
+
+/**
+ * Builds a compact, rigorous statistical summary to send to Gemini.
+ */
+function buildAnalyticalPromptSummary(
+  profiles: DatasetProfile[],
+  crossFileAnalysis: CrossFileCompatibility[]
+): string {
+  const tableSummaries = profiles.map((p, idx) => {
+    const colDetails = p.columns.map((c) => {
+      let statsStr = "";
+      if (c.inferredType === "numeric" && c.numericStats) {
+        statsStr = ` | min=${c.numericStats.min}, max=${c.numericStats.max}, mean=${c.numericStats.mean}, median=${c.numericStats.median}, stdDev=${c.numericStats.standardDeviation}, outliers=${c.numericStats.possibleOutliersCount}`;
+      } else if (c.inferredType === "category" && c.categoricalStats) {
+        const top3 = c.categoricalStats.topValues.slice(0, 3).map((v) => `${v.value} (${v.percentage}%)`).join(", ");
+        statsStr = ` | cardinality=${c.uniqueCount}, top: [${top3}]`;
+      } else if (c.inferredType === "date" && c.dateStats) {
+        statsStr = ` | range=[${c.dateStats.minDate}..${c.dateStats.maxDate}], span=${c.dateStats.spanDays} days, interval=${c.dateStats.approximateGranularity}`;
+      }
+      return `  * ${c.name} [${c.inferredType}] (nulls: ${c.nullPercentage}%)${statsStr}`;
+    }).join("\n");
+
+    const corrStr = p.correlations.length > 0
+      ? p.correlations.slice(0, 4).map((c) => `  * Pearson r(${c.col1}, ${c.col2}) = ${c.pearsonR} (${c.strength}, n=${c.sampleSize})`).join("\n")
+      : "  * No strong bivariate correlations detected.";
+
+    const groupStr = p.groupRelationships.length > 0
+      ? p.groupRelationships.map((g) => `  * ${g.description}`).join("\n")
+      : "  * No notable group segmentation.";
+
+    const tempStr = p.temporalRelationships.length > 0
+      ? p.temporalRelationships.map((t) => `  * ${t.description}`).join("\n")
+      : "  * No chronological series detected.";
+
+    return `Dataset ${idx} ("${p.fileName}"):
+- Rows: ${p.rowCount}, Columns: ${p.columnCount}
+- Column Profiles:
+${colDetails}
+- Calculated Pearson Correlations:
+${corrStr}
+- Group Relationships:
+${groupStr}
+- Temporal Trends:
+${tempStr}`;
+  }).join("\n\n---\n\n");
+
+  const crossFileStr = crossFileAnalysis.length > 0
+    ? crossFileAnalysis.map((c) => `- File ${c.file1Index} ("${c.file1Name}") & File ${c.file2Index} ("${c.file2Name}"): ${c.reason}`).join("\n")
+    : "Single dataset upload.";
+
+  return `### PROFILED DATASETS:\n${tableSummaries}\n\n### CROSS-FILE COMPATIBILITY:\n${crossFileStr}`;
+}
+
+// AI Table Analysis & Visualization Recommendation Endpoint
 app.post("/api/analyze-table", async (req, res) => {
   try {
     const { tables } = req.body;
@@ -43,48 +176,62 @@ app.post("/api/analyze-table", async (req, res) => {
       return res.status(400).json({ error: "Missing or invalid tables data." });
     }
 
+    // Step 1: Deterministic Statistical Profiling & Quality Analysis
+    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(tables);
+
+    // Step 2: Check for Gemini Client
     const ai = getGenAI();
     if (!ai) {
+      // Deterministic fallback
+      const recommendations = generateDeterministicRecommendations(profiles, crossFileAnalysis);
+      const obs: string[] = [];
+      profiles.forEach((p) => {
+        if (p.correlations[0]) {
+          obs.push(`Calculated Pearson r = ${p.correlations[0].pearsonR} between ${p.correlations[0].col1} and ${p.correlations[0].col2}.`);
+        }
+        if (p.temporalRelationships[0]) {
+          obs.push(p.temporalRelationships[0].description);
+        }
+      });
+      if (obs.length === 0) {
+        obs.push("Data profiled deterministically. Ready for multi-dimensional visualization.");
+      }
+
       return res.json({
-        source: "fallback",
-        message: "Gemini API key not found in environment. Generated smart algorithmic recommendations.",
-        recommendations: generateFallbackRecommendations(tables),
+        source: "deterministic",
+        message: "Gemini API key not configured. Generated deterministic statistical recommendations.",
+        domainSummary: `Profiled ${profiles.length} dataset${profiles.length > 1 ? "s" : ""} containing ${profiles.reduce((a, b) => a + b.rowCount, 0)} total records.`,
+        keyObservations: obs.slice(0, 4),
+        dataQuality: dataQualityMap,
+        profiles,
+        crossFileAnalysis,
+        recommendations,
       });
     }
 
-    // Build prompt describing all tables
-    const tableDescriptions = tables.map((t: any, idx: number) => {
-      const colList = (t.columns || []).map(
-        (c: any) => `- ${c.name} (${c.type}): samples [${(c.sampleValues || []).slice(0, 4).join(", ")}]`
-      ).join("\n");
-      const sampleRowsStr = JSON.stringify((t.sampleRows || []).slice(0, 4), null, 2);
-      return `File ${idx + 1}: "${t.fileName}" (${t.rowCount} rows)\nColumns:\n${colList}\nSample rows preview:\n${sampleRowsStr}`;
-    }).join("\n\n---\n\n");
+    // Step 3: Format compact prompt containing strictly profiled facts
+    const compactSummary = buildAnalyticalPromptSummary(profiles, crossFileAnalysis);
 
-    const prompt = `You are an expert data visualization consultant and scientific plotter.
-Analyze the following uploaded tabular dataset(s) and recommend the most insightful, visually appealing charts to plot.
+    const prompt = `You are a precision data visualization consultant.
+Analyze the deterministic statistical profile below and recommend 4 to 6 insightful, mathematically grounded chart configurations.
 
-Dataset details:
-${tableDescriptions}
+CRITICAL DIRECTIVES:
+1. Ground every recommendation STRICTLY in the supplied column names, types, and statistics. Never invent columns, categories, or metrics.
+2. Only mention correlation when supported by the supplied Pearson correlation coefficient (r). Never claim causation.
+3. If cross-file plotting is suggested, you MUST only pair files where Cross-File Compatibility is explicitly marked compatible with a shared key. If compatibility says no reliable relationship exists, DO NOT generate cross-file recommendations.
+4. Select appropriate plot types:
+   - "line" or "area": strictly for chronological dates/time or continuous sequences along X.
+   - "bar": for categorical dimensions or discretized dates.
+   - "scatter": strictly for pairs of numeric variables.
+   - "pie": only for categorical dimensions with 3 to 7 categories and positive totals.
+   - "histogram": for frequency distribution of a single numeric measure.
+   - "composed": for comparing dual metrics or verified cross-dataset alignments.
+5. Provide a crisp title, concise 1-2 sentence description, and exact reason referencing the statistical profile.
 
-Provide 4 to 6 specific, varied, high-quality plot recommendations. For each recommendation:
-1. title: Crisp, human-crafted chart title
-2. description: 1-2 sentence explanation of the pattern or metric being visualized
-3. plotType: Choose from: "bar", "line", "area", "scatter", "pie", "radar", "histogram", "composed"
-4. fileIndex: index of the primary table (0-based)
-5. xAxis: column name to place on X-axis (or primary dimension)
-6. yAxis: column name or array of column names for Y-axis (numerical metrics)
-7. categoryAxis: optional column for grouping / color hue (or null)
-8. secondaryFileIndex: optional index (0-based) if plotting across two files (or null)
-9. secondaryYAxis: optional column from secondary file if cross-plotting (or null)
-10. aggregation: "none", "sum", "mean", or "count"
-11. chartTheme: "amber-craft", "ink-minimal", "sage-forest", "studio-slate", or "indigo-night"
-12. reason: Why this specific visualization is valuable and what insight it reveals.
-
-Return the result matching the structured schema.`;
+${compactSummary}`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -93,12 +240,12 @@ Return the result matching the structured schema.`;
           properties: {
             domainSummary: {
               type: Type.STRING,
-              description: "A 2-sentence summary of what this dataset represents.",
+              description: "A factual 2-sentence summary of what this data represents based on the column names and profiles.",
             },
             keyObservations: {
               type: Type.ARRAY,
               items: { type: Type.STRING },
-              description: "3 key findings or notable patterns in the data.",
+              description: "3 specific findings supported by the provided statistics (e.g. ranges, correlations, distributions).",
             },
             recommendations: {
               type: Type.ARRAY,
@@ -107,22 +254,28 @@ Return the result matching the structured schema.`;
                 properties: {
                   title: { type: Type.STRING },
                   description: { type: Type.STRING },
-                  plotType: { type: Type.STRING },
+                  plotType: {
+                    type: Type.STRING,
+                    description: "One of: bar, line, area, scatter, pie, radar, histogram, composed",
+                  },
                   fileIndex: { type: Type.INTEGER },
                   xAxis: { type: Type.STRING },
                   yAxis: { type: Type.STRING },
                   categoryAxis: { type: Type.STRING },
                   secondaryFileIndex: { type: Type.INTEGER },
                   secondaryYAxis: { type: Type.STRING },
-                  aggregation: { type: Type.STRING },
-                  chartTheme: { type: Type.STRING },
+                  aggregation: { type: Type.STRING, description: "none, sum, mean, or count" },
+                  chartTheme: {
+                    type: Type.STRING,
+                    description: "amber-craft, ink-minimal, sage-forest, studio-slate, or indigo-night",
+                  },
                   reason: { type: Type.STRING },
                 },
-                required: ["title", "plotType", "xAxis", "yAxis"],
+                required: ["title", "plotType", "fileIndex", "xAxis", "yAxis", "reason"],
               },
             },
           },
-          required: ["domainSummary", "recommendations"],
+          required: ["domainSummary", "keyObservations", "recommendations"],
         },
       },
     });
@@ -133,146 +286,59 @@ Return the result matching the structured schema.`;
     }
 
     const parsed = JSON.parse(textOutput);
+
+    // Step 4: Strict Validation and Repair Layer
+    const validatedRecs = validateRecommendations(
+      parsed.recommendations,
+      profiles,
+      crossFileAnalysis
+    );
+
     return res.json({
       source: "gemini",
-      ...parsed,
+      domainSummary: parsed.domainSummary,
+      keyObservations: parsed.keyObservations || [],
+      dataQuality: dataQualityMap,
+      profiles,
+      crossFileAnalysis,
+      recommendations: validatedRecs,
     });
   } catch (error: any) {
-    console.error("AI analysis error:", error);
-    // Graceful fallback to algorithmic recommendations so user flow is never disrupted
+    console.error("AI analysis or Gemini error:", error);
+
+    // Step 5: Graceful Fallback to Deterministic Profiler Engine
+    const { profiles, dataQualityMap, crossFileAnalysis } = runDeterministicAnalysis(req.body.tables || []);
+    const recommendations = generateDeterministicRecommendations(profiles, crossFileAnalysis);
+
+    const fallbackObservations: string[] = [];
+    profiles.forEach((p) => {
+      if (p.correlations.length > 0) {
+        fallbackObservations.push(
+          `Pearson r = ${p.correlations[0].pearsonR} between ${p.correlations[0].col1} and ${p.correlations[0].col2}.`
+        );
+      }
+      if (p.temporalRelationships.length > 0) {
+        fallbackObservations.push(p.temporalRelationships[0].description);
+      }
+    });
+
     return res.json({
-      source: "fallback",
-      message: "AI analysis encountered an error or quota limit. Showing smart heuristic recommendations.",
-      recommendations: generateFallbackRecommendations(req.body.tables || []),
-      domainSummary: "Tabular dataset containing structured records ready for exploration and charting.",
-      keyObservations: ["Detected numeric indicators suitable for aggregation", "Categorical dimensions ready for grouping"],
+      source: "deterministic",
+      message: "Generated via deterministic statistical profiler.",
+      domainSummary: "Statistical profiling and deterministic visualization recommendations based on verified data distributions.",
+      keyObservations:
+        fallbackObservations.length > 0
+          ? fallbackObservations.slice(0, 4)
+          : ["Identified quantitative indicators and categorical axes ready for charting."],
+      dataQuality: dataQualityMap,
+      profiles,
+      crossFileAnalysis,
+      recommendations,
     });
   }
 });
 
-// Algorithmic smart recommendations for instant responses / fallback
-function generateFallbackRecommendations(tables: any[]) {
-  const recommendations: any[] = [];
-  tables.forEach((table, tIdx) => {
-    const cols = table.columns || [];
-    const numCols = cols.filter((c: any) => c.type === "numeric");
-    const catCols = cols.filter((c: any) => c.type === "category");
-    const dateCols = cols.filter((c: any) => c.type === "date");
-
-    // 1. Date + Numeric -> Line chart
-    if (dateCols.length > 0 && numCols.length > 0) {
-      recommendations.push({
-        title: `${numCols[0].name} over Time`,
-        description: `Chronological trajectory of ${numCols[0].name} tracked across ${dateCols[0].name}.`,
-        plotType: "line",
-        fileIndex: tIdx,
-        xAxis: dateCols[0].name,
-        yAxis: numCols[0].name,
-        categoryAxis: catCols[0]?.name || null,
-        aggregation: "none",
-        chartTheme: "amber-craft",
-        reason: "Time-series plots reveal historical trends, seasonality, and inflection points.",
-      });
-    }
-
-    // 2. Category + Numeric -> Bar chart
-    if (catCols.length > 0 && numCols.length > 0) {
-      recommendations.push({
-        title: `${numCols[0].name} by ${catCols[0].name}`,
-        description: `Comparison of total ${numCols[0].name} distribution grouped by ${catCols[0].name}.`,
-        plotType: "bar",
-        fileIndex: tIdx,
-        xAxis: catCols[0].name,
-        yAxis: numCols[0].name,
-        categoryAxis: null,
-        aggregation: "sum",
-        chartTheme: "studio-slate",
-        reason: "Bar charts clearly communicate magnitude contrasts across discrete categories.",
-      });
-    }
-
-    // 3. Category distribution -> Pie or Donut
-    if (catCols.length > 0 && numCols.length > 0) {
-      recommendations.push({
-        title: `Proportion of ${numCols[0].name} across ${catCols[0].name}`,
-        description: `Share breakdown of ${numCols[0].name} among different ${catCols[0].name} segments.`,
-        plotType: "pie",
-        fileIndex: tIdx,
-        xAxis: catCols[0].name,
-        yAxis: numCols[0].name,
-        categoryAxis: null,
-        aggregation: "sum",
-        chartTheme: "sage-forest",
-        reason: "Part-to-whole comparisons highlight dominant categories at a glance.",
-      });
-    }
-
-    // 4. Two numerics -> Scatter plot
-    if (numCols.length >= 2) {
-      recommendations.push({
-        title: `Correlation: ${numCols[0].name} vs ${numCols[1].name}`,
-        description: `Bivariate dispersion analyzing the relationship between ${numCols[0].name} and ${numCols[1].name}.`,
-        plotType: "scatter",
-        fileIndex: tIdx,
-        xAxis: numCols[0].name,
-        yAxis: numCols[1].name,
-        categoryAxis: catCols[0]?.name || null,
-        aggregation: "none",
-        chartTheme: "indigo-night",
-        reason: "Scatter plots uncover clusters, outliers, and linear/non-linear dependencies.",
-      });
-    }
-
-    // 5. Numeric Distribution -> Histogram
-    if (numCols.length > 0) {
-      recommendations.push({
-        title: `Distribution of ${numCols[0].name}`,
-        description: `Frequency distribution and spread of ${numCols[0].name} values.`,
-        plotType: "histogram",
-        fileIndex: tIdx,
-        xAxis: numCols[0].name,
-        yAxis: numCols[0].name,
-        categoryAxis: null,
-        aggregation: "none",
-        chartTheme: "ink-minimal",
-        reason: "Histograms show skewness, modal frequencies, and variance across values.",
-      });
-    }
-  });
-
-  // Cross-file recommendation if 2 or more files exist
-  if (tables.length >= 2) {
-    const t1 = tables[0];
-    const t2 = tables[1];
-    const t1Cols = (t1.columns || []).filter((c: any) => c.type === "date" || c.type === "category" || c.type === "id");
-    const t1Num = (t1.columns || []).filter((c: any) => c.type === "numeric");
-    const t2Num = (t2.columns || []).filter((c: any) => c.type === "numeric");
-
-    const xCol = t1Cols[0]?.name || t1.columns?.[0]?.name;
-    const yCol1 = t1Num[0]?.name || t1.columns?.[1]?.name;
-    const yCol2 = t2Num[0]?.name || t2.columns?.[0]?.name;
-
-    if (xCol && yCol1 && yCol2) {
-      recommendations.push({
-        title: `Cross-File Comparison: [${t1.fileName}] vs [${t2.fileName}]`,
-        description: `Co-plotting ${yCol1} (${t1.fileName}) alongside ${yCol2} (${t2.fileName}).`,
-        plotType: "composed",
-        fileIndex: 0,
-        xAxis: xCol,
-        yAxis: yCol1,
-        secondaryFileIndex: 1,
-        secondaryYAxis: yCol2,
-        aggregation: "none",
-        chartTheme: "amber-craft",
-        reason: "Multi-file plotting allows synthesizing disparate data sources into a unified analytical view.",
-      });
-    }
-  }
-
-  return recommendations;
-}
-
-// Vite middleware or production static serving
+// Vite middleware in development or static serving in production
 async function start() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -289,7 +355,7 @@ async function start() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Plotter server running on http://localhost:${PORT}`);
+    console.log(`vibe-plotter server running on http://localhost:${PORT}`);
   });
 }
 

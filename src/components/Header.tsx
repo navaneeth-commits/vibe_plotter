@@ -25,14 +25,14 @@ export const Header: React.FC<HeaderProps> = ({
           <div>
             <div className="flex items-center space-x-2">
               <h1 className="text-xl font-bold tracking-tight text-stone-900 font-['Space_Grotesk']">
-                Plotter
+                vibe-plotter
               </h1>
               <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/80">
-                Drafting Desk
+                Statistical Visualizer
               </span>
             </div>
             <p className="text-xs text-stone-500 font-sans">
-              Tabular data visualizer • Multi-file analysis & cross-plotting
+              Deterministic tabular profiler • Multi-file analysis & cross-plotting
             </p>
           </div>
         </div>

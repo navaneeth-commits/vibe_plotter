@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { X, FileSpreadsheet, Hash, Calendar, Tag, KeyRound, ChevronDown } from "lucide-react";
+import { X, FileSpreadsheet, Hash, Calendar, Tag, KeyRound, CheckCircle2, AlertTriangle } from "lucide-react";
 import { ParsedTable, ColumnType } from "../types";
 
 interface DataPreviewModalProps {
@@ -29,6 +29,8 @@ export const DataPreviewModal: React.FC<DataPreviewModalProps> = ({
         return <Tag className="w-3 h-3 text-emerald-600" />;
       case "id":
         return <KeyRound className="w-3 h-3 text-purple-600" />;
+      default:
+        return <Tag className="w-3 h-3 text-stone-600" />;
     }
   };
 
@@ -42,6 +44,8 @@ export const DataPreviewModal: React.FC<DataPreviewModalProps> = ({
         return "bg-emerald-50 text-emerald-800 border-emerald-200";
       case "id":
         return "bg-purple-50 text-purple-800 border-purple-200";
+      default:
+        return "bg-stone-50 text-stone-800 border-stone-200";
     }
   };
 
@@ -65,6 +69,9 @@ export const DataPreviewModal: React.FC<DataPreviewModalProps> = ({
               </div>
               <p className="text-xs text-stone-500 font-mono">
                 Total Rows: {table.rowCount.toLocaleString()} • Columns: {table.columns.length}
+                {table.dataQuality && (
+                  <span> • Completeness: {table.dataQuality.overallCompletenessPct}%</span>
+                )}
               </p>
             </div>
           </div>
@@ -90,34 +97,112 @@ export const DataPreviewModal: React.FC<DataPreviewModalProps> = ({
 
         {/* Content body */}
         <div className="p-4 sm:p-6 overflow-y-auto space-y-5">
-          {/* Column categorization cards */}
+          {/* Column statistical profiling cards */}
           <div>
             <h4 className="text-xs font-bold uppercase tracking-wider text-stone-600 mb-2">
-              Detected Columns (Ordered by Type: Numeric, Date, Category, ID)
+              Deterministic Statistical Column Profiles
             </h4>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-              {table.columns.map((col) => (
-                <div
-                  key={col.name}
-                  className="p-2.5 rounded-xl border border-stone-200 bg-stone-50/50 flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between gap-1 mb-1">
-                    <span className="text-xs font-semibold text-stone-900 truncate" title={col.name}>
-                      {col.name}
-                    </span>
-                    <span className={`inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 ${getTypeBadgeClass(col.type)}`}>
-                      {getTypeIcon(col.type)} {col.type}
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-stone-500 font-mono">
-                    {col.type === "numeric" && col.min !== undefined && col.max !== undefined ? (
-                      <span>Range: {col.min} to {col.max}</span>
-                    ) : (
-                      <span>{col.uniqueCount} distinct values</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              {table.columns.map((col) => {
+                const stats = col.profile?.numericStats;
+                const catStats = col.profile?.categoricalStats;
+                const dateStats = col.profile?.dateStats;
+
+                return (
+                  <div
+                    key={col.name}
+                    className="p-3 rounded-xl border border-stone-200 bg-stone-50/50 flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-1 mb-1.5">
+                        <span className="text-xs font-semibold text-stone-900 truncate" title={col.name}>
+                          {col.name}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 ${getTypeBadgeClass(
+                            col.type
+                          )}`}
+                        >
+                          {getTypeIcon(col.type)} {col.type}
+                        </span>
+                      </div>
+
+                      {/* Numeric summary */}
+                      {col.type === "numeric" && stats && (
+                        <div className="text-[11px] text-stone-600 font-mono space-y-0.5">
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Mean:</span>
+                            <span className="font-semibold">{stats.mean.toLocaleString()}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Median:</span>
+                            <span>{stats.median.toLocaleString()}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Range:</span>
+                            <span>[{stats.min} .. {stats.max}]</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Std Dev:</span>
+                            <span>{stats.standardDeviation}</span>
+                          </div>
+                          {stats.possibleOutliersCount > 0 && (
+                            <div className="flex justify-between text-amber-700">
+                              <span>Outliers (IQR):</span>
+                              <span className="font-bold">{stats.possibleOutliersCount}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Categorical summary */}
+                      {col.type === "category" && (
+                        <div className="text-[11px] text-stone-600 font-mono space-y-0.5">
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Cardinality:</span>
+                            <span className="font-semibold">{col.uniqueCount} distinct</span>
+                          </div>
+                          {catStats?.mode && (
+                            <div className="flex justify-between">
+                              <span className="text-stone-400">Top Value:</span>
+                              <span className="truncate max-w-[120px]" title={catStats.mode}>
+                                {catStats.mode}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Date summary */}
+                      {col.type === "date" && dateStats && (
+                        <div className="text-[11px] text-stone-600 font-mono space-y-0.5">
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Span:</span>
+                            <span className="font-semibold">{dateStats.spanDays ?? 0} days</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Interval:</span>
+                            <span className="capitalize">{dateStats.approximateGranularity}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-stone-400">Range:</span>
+                            <span className="truncate max-w-[140px]">
+                              {dateStats.minDate} ~ {dateStats.maxDate}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {col.nullCount !== undefined && col.nullCount > 0 && (
+                      <div className="mt-2 pt-1.5 border-t border-stone-200 text-[10px] text-amber-700 font-mono flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3 shrink-0" />
+                        <span>{col.nullCount} missing cells ({((col.nullCount / table.rowCount) * 100).toFixed(1)}%)</span>
+                      </div>
                     )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -125,7 +210,7 @@ export const DataPreviewModal: React.FC<DataPreviewModalProps> = ({
           <div>
             <div className="flex items-center justify-between mb-2">
               <h4 className="text-xs font-bold uppercase tracking-wider text-stone-600">
-                Data Preview (First {rows.length} rows)
+                Data Rows (First {rows.length} rows)
               </h4>
               <div className="flex items-center gap-1 text-xs">
                 <span className="text-stone-500">Show:</span>

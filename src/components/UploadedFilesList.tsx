@@ -1,5 +1,5 @@
 import React from "react";
-import { FileSpreadsheet, Eye, Trash2, BarChart2, Hash, Calendar, Tag, KeyRound, Sparkles } from "lucide-react";
+import { FileSpreadsheet, Eye, Trash2, BarChart2, Hash, Calendar, Tag, KeyRound, Sparkles, CheckCircle2, AlertCircle } from "lucide-react";
 import { ParsedTable } from "../types";
 
 interface UploadedFilesListProps {
@@ -23,11 +23,11 @@ export const UploadedFilesList: React.FC<UploadedFilesListProps> = ({
 
   return (
     <div className="w-full space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-sm font-bold uppercase tracking-wider text-stone-700 flex items-center gap-2">
           <span>Active Datasets ({tables.length})</span>
           <span className="text-[11px] font-normal text-stone-500 lowercase">
-            — session stored, no auth required
+            — profiled in-memory, private session
           </span>
         </h2>
         <button
@@ -36,7 +36,7 @@ export const UploadedFilesList: React.FC<UploadedFilesListProps> = ({
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
         >
           <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-          <span>{isAILoading ? "Analyzing tables..." : "Get AI Plot Recommendations"}</span>
+          <span>{isAILoading ? "Profiling & Generating Insights..." : "Get Visualization Recommendations"}</span>
         </button>
       </div>
 
@@ -46,6 +46,9 @@ export const UploadedFilesList: React.FC<UploadedFilesListProps> = ({
           const dateCount = table.columns.filter((c) => c.type === "date").length;
           const catCount = table.columns.filter((c) => c.type === "category").length;
           const idCount = table.columns.filter((c) => c.type === "id").length;
+
+          const completeness = table.dataQuality?.overallCompletenessPct ?? 100;
+          const outliersCount = table.dataQuality?.outliersSummary.reduce((acc, o) => acc + o.outlierCount, 0) ?? 0;
 
           return (
             <div
@@ -63,7 +66,7 @@ export const UploadedFilesList: React.FC<UploadedFilesListProps> = ({
                         {table.fileName}
                       </h3>
                       <p className="text-[11px] text-stone-500 font-mono">
-                        {table.rowCount.toLocaleString()} rows • {table.columns.length} columns • {(table.fileSize / 1024).toFixed(1)} KB
+                        {table.rowCount.toLocaleString()} rows • {table.columns.length} cols • {(table.fileSize / 1024).toFixed(1)} KB
                       </p>
                     </div>
                   </div>
@@ -100,6 +103,22 @@ export const UploadedFilesList: React.FC<UploadedFilesListProps> = ({
                     </span>
                   )}
                 </div>
+
+                {/* Statistical & Quality indicator */}
+                <div className="mt-2.5 flex items-center gap-3 text-[11px] font-mono text-stone-600 bg-stone-50 p-2 rounded-lg border border-stone-100">
+                  <span className="flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    <span>{completeness}% complete</span>
+                  </span>
+                  {outliersCount > 0 ? (
+                    <span className="flex items-center gap-1 text-amber-700">
+                      <AlertCircle className="w-3 h-3" />
+                      <span>{outliersCount} outlier{outliersCount > 1 ? "s" : ""}</span>
+                    </span>
+                  ) : (
+                    <span className="text-stone-400">no extreme outliers</span>
+                  )}
+                </div>
               </div>
 
               {/* Actions */}
@@ -109,7 +128,7 @@ export const UploadedFilesList: React.FC<UploadedFilesListProps> = ({
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-stone-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 transition-colors cursor-pointer"
                 >
                   <Eye className="w-3.5 h-3.5 text-stone-600" />
-                  <span>Preview 5 Rows</span>
+                  <span>Inspect Profile</span>
                 </button>
 
                 <button

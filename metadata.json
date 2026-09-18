@@ -1,6 +1,6 @@
 {
-  "name": "Plotter",
-  "description": "Upload tabular data files (Excel, CSV, PDF, TSV), auto-categorize columns, receive AI plot recommendations, build multi-file charts, inspect visualizations, and export high-res images.",
+  "name": "vibe-plotter",
+  "description": "Upload tabular data files (CSV, Excel, PDF, TSV), compute deterministic statistical profiles & correlations, receive verified AI plot recommendations, build multi-file charts, inspect visualizations, and export high-res images.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

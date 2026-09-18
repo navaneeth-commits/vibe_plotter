@@ -14,6 +14,7 @@ import {
   PlotConfig,
 } from "./types";
 import { getInitializedSampleTables } from "./utils/sampleData";
+import { profileDataset } from "./utils/profiler/statisticalProfiler";
 import { BarChart3, Compass } from "lucide-react";
 
 export default function App() {
@@ -43,15 +44,10 @@ export default function App() {
     try {
       const payload = {
         tables: tablesToAnalyze.map((t) => ({
+          id: t.id,
           fileName: t.fileName,
           rowCount: t.rowCount,
-          columns: t.columns.map((c) => ({
-            name: c.name,
-            type: c.type,
-            sampleValues: c.sampleValues,
-            uniqueCount: c.uniqueCount,
-          })),
-          sampleRows: t.rows.slice(0, 5),
+          rows: t.rows.slice(0, 1000),
         })),
       };
 
@@ -74,11 +70,25 @@ export default function App() {
     }
   };
 
+  // Helper to enrich table with statistical profile & quality
+  const enrichTable = (t: ParsedTable): ParsedTable => {
+    if (t.profile && t.dataQuality) return t;
+    try {
+      const { profile, dataQuality } = profileDataset(t.id, t.fileName, t.rows);
+      return { ...t, profile, dataQuality };
+    } catch (e) {
+      console.warn("Failed to profile table client-side:", e);
+      return t;
+    }
+  };
+
   // Add parsed file(s) adhering strictly to the multipleFilesEnabled flag
   const handleFilesParsed = (newTables: ParsedTable[]) => {
+    const enriched = newTables.map(enrichTable);
+
     if (!multipleFilesEnabled) {
       // If multiple files is disabled: replace existing file with the new one
-      const singleTable = newTables[0];
+      const singleTable = enriched[0];
       setTables([singleTable]);
       setActiveTableId(singleTable.id);
       setAiAnalysis(null);
@@ -87,7 +97,7 @@ export default function App() {
     } else {
       // If multiple files is enabled: append to list
       setTables((prev) => {
-        const combined = [...prev, ...newTables];
+        const combined = [...prev, ...enriched];
         if (!activeTableId && combined[0]) {
           setActiveTableId(combined[0].id);
         }
@@ -99,7 +109,8 @@ export default function App() {
 
   // Load sample demo datasets
   const handleLoadSamples = () => {
-    const sampleTables = getInitializedSampleTables();
+    const rawSamples = getInitializedSampleTables();
+    const sampleTables = rawSamples.map(enrichTable);
     setMultipleFilesEnabled(true);
     setTables(sampleTables);
     if (sampleTables.length > 0) {
@@ -309,7 +320,7 @@ export default function App() {
       {/* Footer */}
       <footer className="border-t border-stone-200 bg-[#FAF9F5] py-6 text-center text-xs text-stone-500 font-mono">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-wrap items-center justify-between gap-2">
-          <span>Plotter • Precision tabular visualization & multi-dataset plotting</span>
+          <span>vibe-plotter • Precision tabular visualization & multi-dataset plotting</span>
           <span>Zero cloud database • 100% private in-memory session</span>
         </div>
       </footer>
