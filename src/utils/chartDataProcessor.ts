@@ -221,79 +221,107 @@ export function prepareChartData(
     };
   }
 
-  // 3. CROSS-FILE PLOTTING (Key-based alignment with deterministic duplicate key handling)
+  // 3. CROSS-FILE PLOTTING (Requires verified explicit primary and secondary match keys)
   if (config.isCrossFile && config.secondaryTableId) {
     const secondaryTable = tablesMap[config.secondaryTableId];
-    if (secondaryTable) {
-      const pRows = primaryTable.rows;
-      const sRows = secondaryTable.rows;
-
-      // Identify join key in primary and secondary tables
-      const primaryKey = config.matchKeyPrimary || config.xAxisCol || primaryTable.columns[0]?.name || "id";
-      let secKey = config.matchKeySecondary;
-      if (!secKey) {
-        const secColMatch = secondaryTable.columns.find(
-          (c) => c.name.toLowerCase().trim() === primaryKey.toLowerCase().trim()
-        );
-        secKey = secColMatch ? secColMatch.name : (secondaryTable.columns[0]?.name || primaryKey);
-      }
-
-      // Group secondary table by key to handle duplicates deterministically (mean aggregation)
-      const y2Col = config.secondaryYAxisCol;
-      const sValuesMap = new Map<string, number[]>();
-
-      sRows.forEach((sr) => {
-        const rawKey = sr[secKey!] !== undefined && sr[secKey!] !== null ? sr[secKey!] : "";
-        const keyVal = String(rawKey).trim().toLowerCase();
-        if (keyVal.length > 0 && y2Col && sr[y2Col] !== undefined) {
-          const num = cleanNumber(sr[y2Col]);
-          if (num !== null) {
-            if (!sValuesMap.has(keyVal)) {
-              sValuesMap.set(keyVal, []);
-            }
-            sValuesMap.get(keyVal)!.push(num);
-          }
-        }
-      });
-
-      const y1Cols = yCols;
-      const merged: Record<string, any>[] = [];
-
-      pRows.forEach((pR, idx) => {
-        const rawX = pR[primaryKey] !== undefined && pR[primaryKey] !== null ? pR[primaryKey] : `Row ${idx + 1}`;
-        const lookupKey = String(rawX).trim().toLowerCase();
-        const rowObj: Record<string, any> = { [primaryKey]: rawX };
-
-        y1Cols.forEach((yCol) => {
-          rowObj[`[${primaryTable.fileName}] ${yCol}`] = cleanNumber(pR[yCol]);
-        });
-
-        if (y2Col) {
-          const vals = sValuesMap.get(lookupKey);
-          if (vals && vals.length > 0) {
-            // Deterministic average for duplicate matching keys
-            const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-            rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = Math.round(avg * 100) / 100;
-          } else {
-            rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = null;
-          }
-        }
-
-        merged.push(rowObj);
-      });
-
-      const seriesKeys = [
-        ...y1Cols.map((yCol) => `[${primaryTable.fileName}] ${yCol}`),
-        ...(y2Col ? [`[${secondaryTable.fileName}] ${y2Col}`] : []),
-      ];
-
+    if (!secondaryTable) {
       return {
-        chartData: merged,
-        seriesKeys,
-        xAxisKey: primaryKey,
+        chartData: [],
+        seriesKeys: [],
+        xAxisKey: config.xAxisCol || "",
         palette,
       };
     }
+
+    // Explicit verified keys are required; never guess or fall back to secondaryTable.columns[0] or column position
+    const primaryKey = config.matchKeyPrimary?.trim();
+    const secKey = config.matchKeySecondary?.trim();
+
+    if (!primaryKey || !secKey) {
+      return {
+        chartData: [],
+        seriesKeys: [],
+        xAxisKey: config.xAxisCol || "",
+        palette,
+      };
+    }
+
+    const primaryColMatch = primaryTable.columns.find(
+      (c) => c.name.toLowerCase().trim() === primaryKey.toLowerCase()
+    );
+    const secColMatch = secondaryTable.columns.find(
+      (c) => c.name.toLowerCase().trim() === secKey.toLowerCase()
+    );
+
+    if (!primaryColMatch || !secColMatch) {
+      return {
+        chartData: [],
+        seriesKeys: [],
+        xAxisKey: config.xAxisCol || primaryKey,
+        palette,
+      };
+    }
+
+    const matchedPrimaryKey = primaryColMatch.name;
+    const matchedSecKey = secColMatch.name;
+    const pRows = primaryTable.rows;
+    const sRows = secondaryTable.rows;
+
+    // Group secondary table by key to handle duplicates deterministically (mean aggregation)
+    const y2Col = config.secondaryYAxisCol;
+    const sValuesMap = new Map<string, number[]>();
+
+    sRows.forEach((sr) => {
+      const rawKey = sr[matchedSecKey] !== undefined && sr[matchedSecKey] !== null ? sr[matchedSecKey] : "";
+      const keyVal = String(rawKey).trim().toLowerCase();
+      if (keyVal.length > 0 && y2Col && sr[y2Col] !== undefined) {
+        const num = cleanNumber(sr[y2Col]);
+        if (num !== null) {
+          if (!sValuesMap.has(keyVal)) {
+            sValuesMap.set(keyVal, []);
+          }
+          sValuesMap.get(keyVal)!.push(num);
+        }
+      }
+    });
+
+    const y1Cols = yCols;
+    const merged: Record<string, any>[] = [];
+
+    pRows.forEach((pR, idx) => {
+      const rawX = pR[matchedPrimaryKey] !== undefined && pR[matchedPrimaryKey] !== null ? pR[matchedPrimaryKey] : `Row ${idx + 1}`;
+      const lookupKey = String(rawX).trim().toLowerCase();
+      const rowObj: Record<string, any> = { [matchedPrimaryKey]: rawX };
+
+      y1Cols.forEach((yCol) => {
+        rowObj[`[${primaryTable.fileName}] ${yCol}`] = cleanNumber(pR[yCol]);
+      });
+
+      if (y2Col) {
+        const vals = sValuesMap.get(lookupKey);
+        if (vals && vals.length > 0) {
+          // Deterministic average for duplicate matching keys
+          const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+          rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = Math.round(avg * 100) / 100;
+        } else {
+          rowObj[`[${secondaryTable.fileName}] ${y2Col}`] = null;
+        }
+      }
+
+      merged.push(rowObj);
+    });
+
+    const seriesKeys = [
+      ...y1Cols.map((yCol) => `[${primaryTable.fileName}] ${yCol}`),
+      ...(y2Col ? [`[${secondaryTable.fileName}] ${y2Col}`] : []),
+    ];
+
+    return {
+      chartData: merged,
+      seriesKeys,
+      xAxisKey: matchedPrimaryKey,
+      palette,
+    };
   }
 
   // 4. STANDARD SINGLE-TABLE PLOTTING (With Aggregation if requested)

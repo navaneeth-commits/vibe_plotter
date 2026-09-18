@@ -176,6 +176,34 @@ describe("Multi-File Compatibility Analyzer", () => {
     assert.equal(compat.compatible, false);
     assert.ok(compat.reason.includes("No reliable cross-file relationship"));
   });
+
+  test("preserves '0' as a valid join-key value and contributes to overlap detection", () => {
+    const rows1 = [
+      { Group_Id: "0", MetricA: 10 },
+      { Group_Id: "1", MetricA: 20 },
+      { Group_Id: "2", MetricA: 30 },
+    ];
+    const rows2 = [
+      { Group_Id: "0", MetricB: 100 },
+      { Group_Id: "1", MetricB: 200 },
+      { Group_Id: "2", MetricB: 300 },
+    ];
+
+    const { profile: p1 } = profileDataset("t1", "clusters_a.csv", rows1);
+    const { profile: p2 } = profileDataset("t2", "clusters_b.csv", rows2);
+
+    const compat = analyzeCrossFileCompatibility(p1, p2, rows1, rows2, 0, 1);
+    assert.equal(compat.compatible, true);
+    assert.ok(compat.commonKeyCandidates.includes("Group_Id"));
+
+    const mapping = compat.joinKeyMappings.find(
+      (m) => m.primaryKey === "Group_Id" && m.secondaryKey === "Group_Id"
+    );
+    assert.ok(mapping);
+    // Crucial: "0" must not be discarded as a placeholder; all 3 values (0, 1, 2) must match
+    assert.equal(mapping.sharedValuesCount, 3);
+    assert.equal(mapping.overlapRatio, 1.0);
+  });
 });
 
 describe("Deterministic Fallback & Recommendation Validation", () => {
@@ -337,6 +365,8 @@ describe("Statistical Edge Cases & Data Pipeline Integrity", () => {
       isCrossFile: true,
       secondaryTableId: "tbl_costs",
       secondaryYAxisCol: "Expenses",
+      matchKeyPrimary: "Quarter",
+      matchKeySecondary: "Quarter",
       aggregation: "none",
       theme: "amber-craft",
       showGrid: true,
@@ -361,6 +391,74 @@ describe("Statistical Edge Cases & Data Pipeline Integrity", () => {
     assert.ok(q3);
     assert.equal(q3["[sales.csv] Revenue"], 200);
     assert.equal(q3["[costs.csv] Expenses"], 120);
+  });
+
+  test("does not guess secondary join key or silently join against secondary table first column when matchKeySecondary is missing", () => {
+    const tablePrimary: ParsedTable = {
+      id: "tbl_p",
+      fileName: "primary.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 2,
+      columns: [
+        { name: "Year", type: "category", sampleValues: ["2023"], uniqueCount: 2, nonEmptyCount: 2 },
+        { name: "Revenue", type: "numeric", sampleValues: [100], uniqueCount: 2, nonEmptyCount: 2 },
+      ],
+      rows: [
+        { Year: "2023", Revenue: 100 },
+        { Year: "2024", Revenue: 150 },
+      ],
+    };
+
+    // Secondary table where the FIRST column is UnrelatedCode (not Year)
+    const tableSecondary: ParsedTable = {
+      id: "tbl_s",
+      fileName: "secondary.csv",
+      fileSize: 100,
+      fileType: "csv",
+      uploadedAt: Date.now(),
+      rowCount: 2,
+      columns: [
+        { name: "UnrelatedCode", type: "category", sampleValues: ["2023"], uniqueCount: 2, nonEmptyCount: 2 },
+        { name: "Year", type: "category", sampleValues: ["2023"], uniqueCount: 2, nonEmptyCount: 2 },
+        { name: "Expenses", type: "numeric", sampleValues: [50], uniqueCount: 2, nonEmptyCount: 2 },
+      ],
+      rows: [
+        { UnrelatedCode: "2023", Year: "2023", Expenses: 50 },
+        { UnrelatedCode: "2024", Year: "2024", Expenses: 80 },
+      ],
+    };
+
+    const configNoSecKey: PlotConfig = {
+      id: "p_no_sec",
+      title: "Cross without verified secondary key",
+      plotType: "composed",
+      primaryTableId: "tbl_p",
+      xAxisCol: "Year",
+      yAxisCols: ["Revenue"],
+      isCrossFile: true,
+      secondaryTableId: "tbl_s",
+      secondaryYAxisCol: "Expenses",
+      matchKeyPrimary: "Year",
+      // matchKeySecondary is intentionally omitted
+      aggregation: "none",
+      theme: "amber-craft",
+      showGrid: true,
+      showLegend: true,
+      showDataPoints: true,
+      curveType: "monotone",
+      createdAt: Date.now(),
+    };
+
+    const result = prepareChartData(configNoSecKey, {
+      tbl_p: tablePrimary,
+      tbl_s: tableSecondary,
+    });
+
+    // Must return safe empty / no cross-file series data, NEVER silently joining against tableSecondary.columns[0]
+    assert.equal(result.chartData.length, 0);
+    assert.ok(!result.seriesKeys.includes("[secondary.csv] Expenses"));
   });
 
   test("preserves missing numeric values as null and does not coerce to zero", () => {

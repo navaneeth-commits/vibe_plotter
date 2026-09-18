@@ -145,7 +145,7 @@ function parseNumeric(v: unknown): number | null {
 }
 
 const PLACEHOLDER_TOKENS = new Set([
-  "", "n/a", "na", "null", "none", "unknown", "0", "-", ".", "undefined", "other"
+  "", "n/a", "na", "null", "none", "unknown", "-", ".", "undefined", "other"
 ]);
 
 /**
